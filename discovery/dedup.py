@@ -8,7 +8,7 @@ Prevents processing duplicate market events.
 import hashlib
 import logging
 from typing import Set, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 
 from .types import MarketEvent, VenueType
 
@@ -66,7 +66,7 @@ class MarketDeduplicator:
         # Mark as seen
         self._seen.add(identity_hash)
         if self.ttl_seconds:
-            self._seen_timestamps[identity_hash] = datetime.utcnow()
+            self._seen_timestamps[identity_hash] = datetime.now(UTC)
         
         return False
     
@@ -75,7 +75,7 @@ class MarketDeduplicator:
         if not self.ttl_seconds:
             return
         
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         expired = [
             hash_val
             for hash_val, timestamp in self._seen_timestamps.items()

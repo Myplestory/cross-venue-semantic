@@ -7,7 +7,7 @@ Handles connection, reconnection, and event normalization.
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Optional
 
 from .base_connector import BaseVenueConnector
@@ -163,7 +163,7 @@ class KalshiConnector(BaseVenueConnector):
                     end_date=end_date,
                     outcomes=outcomes,
                     raw_payload=data,
-                    received_at=datetime.utcnow()
+                    received_at=datetime.now(UTC)
                 )
             
             # Unknown message format

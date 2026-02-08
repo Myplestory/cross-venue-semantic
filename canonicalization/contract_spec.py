@@ -5,7 +5,7 @@ Structured representation of market contract specifications.
 Used for LLM extraction and pair verification.
 """
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 from typing import Optional, List
 from datetime import datetime
 
@@ -109,13 +109,11 @@ class ContractSpec(BaseModel):
         description="LLM notes about extraction process"
     )
     
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
-        validate_assignment = True
-        # Pydantic v2 compatibility
-        from_attributes = True
+    model_config = ConfigDict(
+        json_encoders={datetime: lambda v: v.isoformat()},
+        validate_assignment=True,
+        from_attributes=True
+    )
     
     @classmethod
     async def from_json_async(cls, json_str: str) -> 'ContractSpec':

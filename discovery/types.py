@@ -5,7 +5,7 @@ Core event types and connector interfaces.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Literal, Optional, Protocol, AsyncIterator
 from enum import Enum
 
@@ -54,7 +54,7 @@ class MarketEvent:
         if self.raw_payload is None:
             self.raw_payload = {}
         if self.received_at is None:
-            self.received_at = datetime.utcnow()
+            self.received_at = datetime.now(UTC)
 
 
 class VenueConnector(Protocol):

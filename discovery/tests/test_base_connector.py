@@ -9,8 +9,8 @@ from ..base_connector import BaseVenueConnector
 from ..types import VenueType, MarketEvent, EventType
 
 
-class TestConnector(BaseVenueConnector):
-    """Test connector implementation."""
+class MockConnector(BaseVenueConnector):
+    """Mock connector implementation for testing."""
     
     def _build_subscription_message(self):
         return {"type": "subscribe"}
@@ -31,7 +31,7 @@ class TestConnector(BaseVenueConnector):
 @pytest.fixture
 def test_connector():
     """Create test connector instance."""
-    return TestConnector(
+    return MockConnector(
         venue_name=VenueType.KALSHI,
         ws_url="wss://test.com/ws",
         reconnect_delay=0.1

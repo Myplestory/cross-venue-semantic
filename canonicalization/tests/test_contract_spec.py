@@ -148,7 +148,7 @@ class TestContractSpec:
         """Test ContractSpec JSON deserialization."""
         json_str = '{"statement": "Will Bitcoin reach $100,000?", "confidence": 0.9}'
         
-        spec = ContractSpec.parse_raw(json_str)
+        spec = ContractSpec.model_validate_json(json_str)
         
         assert spec.statement == "Will Bitcoin reach $100,000?"
         assert spec.confidence == 0.9

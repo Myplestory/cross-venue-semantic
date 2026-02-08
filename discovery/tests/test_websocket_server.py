@@ -9,7 +9,6 @@ import json
 import logging
 from typing import Optional, Callable
 import websockets
-from websockets.server import WebSocketServerProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +19,7 @@ class MockWebSocketServer:
     def __init__(self, port: int = 8765):
         self.port = port
         self.server: Optional[websockets.server.Serve] = None
-        self.clients: list[WebSocketServerProtocol] = []
+        self.clients: list = []  # List of websocket connections
         self.messages_received: list[dict] = []
         self.message_handler: Optional[Callable] = None
     
@@ -45,7 +44,7 @@ class MockWebSocketServer:
             await self.server.wait_closed()
             logger.info("Mock WebSocket server stopped")
     
-    async def _handle_client(self, ws: WebSocketServerProtocol, path: str):
+    async def _handle_client(self, ws, path: str):
         """Handle a new WebSocket client connection."""
         self.clients.append(ws)
         logger.info(f"Client connected: {path}")
@@ -106,7 +105,7 @@ class KalshiMockServer(MockWebSocketServer):
         )
         logger.info(f"Mock WebSocket server started on ws://localhost:{self.port}")
     
-    async def _handle_client(self, ws: WebSocketServerProtocol, path: str):
+    async def _handle_client(self, ws, path: str):
         """Handle Kalshi client with subscription acknowledgment."""
         self.clients.append(ws)
         logger.info(f"Kalshi client connected: {path}")
@@ -168,7 +167,7 @@ class PolymarketMockServer(MockWebSocketServer):
         )
         logger.info(f"Mock WebSocket server started on ws://localhost:{self.port}")
     
-    async def _handle_client(self, ws: WebSocketServerProtocol, path: str):
+    async def _handle_client(self, ws, path: str):
         """Handle Polymarket client with subscription acknowledgment."""
         self.clients.append(ws)
         logger.info(f"Polymarket client connected: {path}")

@@ -10,7 +10,7 @@ https://docs.polymarket.com/developers/CLOB/websocket/wss-overview
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Optional, List
 
 from .base_connector import BaseVenueConnector
@@ -127,7 +127,7 @@ class PolymarketConnector(BaseVenueConnector):
                     end_date=None,
                     outcomes=[],  # Not available in orderbook message
                     raw_payload=data,
-                    received_at=datetime.utcnow()
+                    received_at=datetime.now(UTC)
                 )
             
             # Handle market data messages (if available)
@@ -176,7 +176,7 @@ class PolymarketConnector(BaseVenueConnector):
                     end_date=end_date,
                     outcomes=outcomes,
                     raw_payload=data,
-                    received_at=datetime.utcnow()
+                    received_at=datetime.now(UTC)
                 )
             
             # Unknown message type
