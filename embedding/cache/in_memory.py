@@ -101,7 +101,7 @@ class InMemoryCache:
                 del self._cache[content_hash]
             
             # Evict oldest if at capacity
-            if len(self._cache) >= self.max_size:
+            if len(self._cache) >= self.max_size and len(self._cache) > 0:
                 oldest_key = next(iter(self._cache))
                 del self._cache[oldest_key]
                 logger.debug(f"LRU eviction: removed {oldest_key[:8]}...")

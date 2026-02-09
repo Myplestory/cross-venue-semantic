@@ -10,5 +10,7 @@ Separate Python process for:
 - Writing verified pairs to database
 """
 
-__version__ = "0.1.0"
+# Load configuration early (loads .env file)
+from . import config  # noqa: F401
 
+__version__ = "0.1.0"
