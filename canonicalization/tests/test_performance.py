@@ -307,3 +307,4 @@ class TestMemoryEfficiency:
         assert len(all_results) == 1000
         assert all(isinstance(text, str) for _, text in all_results)
 
+

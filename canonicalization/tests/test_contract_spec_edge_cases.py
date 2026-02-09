@@ -302,3 +302,4 @@ class TestContractSpecSerializationEdgeCases:
         assert len(restored.entities) == len(original.entities)
         assert restored.entities[0].name == original.entities[0].name
 
+

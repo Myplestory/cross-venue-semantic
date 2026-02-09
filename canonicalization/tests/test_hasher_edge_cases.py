@@ -319,3 +319,4 @@ class TestHashCollisionResistance:
         # All should be different (even small differences)
         assert len(set(hashes)) == len(texts)
 
+

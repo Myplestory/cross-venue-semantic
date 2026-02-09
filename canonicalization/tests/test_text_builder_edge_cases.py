@@ -401,3 +401,4 @@ class TestTextBuilderAsyncEdgeCases:
         assert len(results) == 3
         assert all(isinstance(text, str) for _, text in results)
 
+

@@ -1,2 +1,3 @@
 """Tests for canonicalization module."""
 
+

@@ -235,3 +235,4 @@ class TestTextBuilderFactory:
         with pytest.raises(ValueError, match="Unsupported venue"):
             get_builder(VenueType.OPINION)  # Not yet implemented
 
+
