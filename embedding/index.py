@@ -102,10 +102,12 @@ class QdrantIndex:
             else:
                 logger.info(f"Collection '{self.collection_name}' already exists")
             
-            # Create index on identity_hash for efficient filtering
-            # This is required for get_by_identity_hash and search filtering
+            # Create indexes on payload fields for efficient filtering
+            # Required for get_by_identity_hash, search filtering, and cross-venue matching
             try:
                 from qdrant_client.models import PayloadSchemaType
+                
+                # Index on identity_hash for retrieval by identity
                 await self._client.create_payload_index(
                     collection_name=self.collection_name,
                     field_name="identity_hash",
@@ -113,9 +115,22 @@ class QdrantIndex:
                 )
                 logger.debug("Created index on 'identity_hash' field")
             except Exception as e:
-                # Index might already exist, which is fine
                 if "already exists" not in str(e).lower():
                     logger.warning(f"Failed to create index on 'identity_hash': {e}")
+            
+            try:
+                from qdrant_client.models import PayloadSchemaType
+                
+                # Index on venue for cross-venue matching filters
+                await self._client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name="venue",
+                    field_schema=PayloadSchemaType.KEYWORD,
+                )
+                logger.debug("Created index on 'venue' field")
+            except Exception as e:
+                if "already exists" not in str(e).lower():
+                    logger.warning(f"Failed to create index on 'venue': {e}")
             
             self._initialized = True
             

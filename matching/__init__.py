@@ -7,3 +7,10 @@ Two-stage matching pipeline:
 3. LLM verification (final gate)
 """
 
+from .types import CandidateMatch
+from .retriever import CandidateRetriever
+
+__all__ = [
+    "CandidateMatch",
+    "CandidateRetriever",
+]
