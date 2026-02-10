@@ -21,7 +21,7 @@ import config
 @pytest.mark.integration
 @pytest.mark.slow
 @pytest.mark.asyncio
-async def test_full_pipeline_retrieval_to_rerank(real_qdrant_config, sample_canonical_event):
+async def test_full_pipeline_retrieval_to_rerank(real_qdrant_config, sample_canonical_event, shared_cross_encoder):
     """Test full pipeline: retrieval → cross-encoder → reranker."""
     if not real_qdrant_config["api_key"]:
         pytest.skip("QDRANT_API_KEY not set in .env")
@@ -57,10 +57,8 @@ async def test_full_pipeline_retrieval_to_rerank(real_qdrant_config, sample_cano
     assert all(isinstance(c, CandidateMatch) for c in candidates)
     
     # Phase 2: Cross-Encoder + Reranker
-    cross_encoder = CrossEncoder()
-    await cross_encoder.initialize()
-    
-    reranker = CandidateReranker(cross_encoder, top_k=5, score_threshold=0.5)
+    # Use shared cross_encoder fixture to avoid redundant model loading
+    reranker = CandidateReranker(shared_cross_encoder, top_k=5, score_threshold=0.5)
     await reranker.initialize()
     
     verified_matches = await reranker.rerank_async(sample_canonical_event, candidates)
@@ -79,7 +77,7 @@ async def test_full_pipeline_retrieval_to_rerank(real_qdrant_config, sample_cano
 @pytest.mark.integration
 @pytest.mark.slow
 @pytest.mark.asyncio
-async def test_full_pipeline_cross_venue_matching(real_qdrant_config, sample_canonical_event):
+async def test_full_pipeline_cross_venue_matching(real_qdrant_config, sample_canonical_event, shared_cross_encoder):
     """Test full pipeline with cross-venue matching."""
     if not real_qdrant_config["api_key"]:
         pytest.skip("QDRANT_API_KEY not set in .env")
@@ -119,10 +117,8 @@ async def test_full_pipeline_cross_venue_matching(real_qdrant_config, sample_can
             assert candidate.canonical_event.event.venue != sample_canonical_event.event.venue
         
         # Rerank cross-venue matches
-        cross_encoder = CrossEncoder()
-        await cross_encoder.initialize()
-        
-        reranker = CandidateReranker(cross_encoder, score_threshold=0.5)
+        # Use shared cross_encoder fixture
+        reranker = CandidateReranker(shared_cross_encoder, score_threshold=0.5)
         await reranker.initialize()
         
         verified = await reranker.rerank_async(sample_canonical_event, candidates)
@@ -135,7 +131,7 @@ async def test_full_pipeline_cross_venue_matching(real_qdrant_config, sample_can
 @pytest.mark.slow
 @pytest.mark.performance
 @pytest.mark.asyncio
-async def test_full_pipeline_performance(real_qdrant_config, sample_canonical_event):
+async def test_full_pipeline_performance(real_qdrant_config, sample_canonical_event, shared_cross_encoder):
     """Test full pipeline performance."""
     if not real_qdrant_config["api_key"]:
         pytest.skip("QDRANT_API_KEY not set in .env")
@@ -165,10 +161,8 @@ async def test_full_pipeline_performance(real_qdrant_config, sample_canonical_ev
     retriever = CandidateRetriever(index, default_top_k=10)
     await retriever.initialize()
     
-    cross_encoder = CrossEncoder()
-    await cross_encoder.initialize()
-    
-    reranker = CandidateReranker(cross_encoder, top_k=5)
+    # Use shared cross_encoder fixture
+    reranker = CandidateReranker(shared_cross_encoder, top_k=5)
     await reranker.initialize()
     
     # Measure full pipeline time
@@ -179,11 +173,28 @@ async def test_full_pipeline_performance(real_qdrant_config, sample_canonical_ev
     
     elapsed = time.time() - start
     
-    # Performance targets (adjust based on your hardware)
-    # Full pipeline should complete in reasonable time
-    assert elapsed < 10.0  # 10 seconds for full pipeline (retrieval + reranking)
+    # Device-aware performance thresholds (industry standard)
+    # Different hardware has different performance characteristics
+    import torch
     
-    print(f"\nFull pipeline time: {elapsed:.2f}s")
+    if torch.cuda.is_available():
+        # CUDA: Fastest, expect < 10s
+        max_elapsed = 10.0
+        device = "CUDA"
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        # MPS: Slower than CUDA, expect < 90s for full pipeline
+        max_elapsed = 90.0
+        device = "MPS"
+    else:
+        # CPU: Slowest, expect < 120s
+        max_elapsed = 120.0
+        device = "CPU"
+    
+    assert elapsed < max_elapsed, (
+        f"Pipeline took {elapsed:.2f}s, exceeded {max_elapsed}s threshold for {device}"
+    )
+    
+    print(f"\nFull pipeline time: {elapsed:.2f}s (threshold: {max_elapsed}s for {device})")
     print(f"  - Candidates retrieved: {len(candidates)}")
     print(f"  - Verified matches: {len(verified)}")
 
@@ -191,7 +202,7 @@ async def test_full_pipeline_performance(real_qdrant_config, sample_canonical_ev
 @pytest.mark.integration
 @pytest.mark.slow
 @pytest.mark.asyncio
-async def test_full_pipeline_verified_match_structure(real_qdrant_config, sample_canonical_event):
+async def test_full_pipeline_verified_match_structure(real_qdrant_config, sample_canonical_event, shared_cross_encoder):
     """Test that VerifiedMatch has complete structure after full pipeline."""
     if not real_qdrant_config["api_key"]:
         pytest.skip("QDRANT_API_KEY not set in .env")
@@ -224,10 +235,8 @@ async def test_full_pipeline_verified_match_structure(real_qdrant_config, sample
     if not candidates:
         pytest.skip("No candidates found in Qdrant")
     
-    cross_encoder = CrossEncoder()
-    await cross_encoder.initialize()
-    
-    reranker = CandidateReranker(cross_encoder, score_threshold=0.0)  # Low threshold to get results
+    # Use shared cross_encoder fixture
+    reranker = CandidateReranker(shared_cross_encoder, score_threshold=0.0)  # Low threshold to get results
     await reranker.initialize()
     
     verified = await reranker.rerank_async(sample_canonical_event, candidates)
@@ -253,7 +262,7 @@ async def test_full_pipeline_verified_match_structure(real_qdrant_config, sample
 @pytest.mark.integration
 @pytest.mark.slow
 @pytest.mark.asyncio
-async def test_full_pipeline_score_consistency(real_qdrant_config, sample_canonical_event):
+async def test_full_pipeline_score_consistency(real_qdrant_config, sample_canonical_event, shared_cross_encoder):
     """Test that scores are consistent across pipeline stages."""
     if not real_qdrant_config["api_key"]:
         pytest.skip("QDRANT_API_KEY not set in .env")
@@ -289,10 +298,8 @@ async def test_full_pipeline_score_consistency(real_qdrant_config, sample_canoni
     # Store original similarity scores
     original_scores = {c.canonical_event.identity_hash: c.similarity_score for c in candidates}
     
-    cross_encoder = CrossEncoder()
-    await cross_encoder.initialize()
-    
-    reranker = CandidateReranker(cross_encoder, score_threshold=0.0)
+    # Use shared cross_encoder fixture
+    reranker = CandidateReranker(shared_cross_encoder, score_threshold=0.0)
     await reranker.initialize()
     
     verified = await reranker.rerank_async(sample_canonical_event, candidates)

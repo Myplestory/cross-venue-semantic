@@ -44,6 +44,7 @@ class CrossEncoder:
         batch_size: int = 8,
         max_length: int = 512,
         use_quantization: bool = False,
+        use_compilation: bool = True,
         entailment_threshold: float = 0.7,
         neutral_threshold: float = 0.3,
     ):
@@ -64,6 +65,7 @@ class CrossEncoder:
         self.batch_size = batch_size
         self.max_length = max_length
         self.use_quantization = use_quantization
+        self.use_compilation = use_compilation
         self.entailment_threshold = entailment_threshold
         self.neutral_threshold = neutral_threshold
         
@@ -91,7 +93,8 @@ class CrossEncoder:
         logger.info(
             f"CrossEncoder initialized: model={model_name}, "
             f"device={self.device}, batch_size={batch_size}, "
-            f"quantization={self.use_quantization}"
+            f"quantization={self.use_quantization}, "
+            f"compilation={self.use_compilation}"
         )
     
     async def initialize(self) -> None:
@@ -163,6 +166,69 @@ class CrossEncoder:
         )
         model.to(self.device)
         model.eval()
+        
+        # OPTIMIZATION: Compile model for faster inference
+        # torch.compile() is available in PyTorch 2.0+
+        # Compiles model to optimized code (one-time overhead, then faster)
+        compilation_status = "DISABLED"
+        compilation_reason = None
+        
+        if self.use_compilation:
+            # MPS: torch.compile() has known issues with Metal shader generation
+            # Disable compilation on MPS until PyTorch fixes support
+            if self.device == "mps":
+                compilation_status = "DISABLED"
+                compilation_reason = "MPS device - torch.compile() has known Metal shader compilation errors"
+                logger.warning(
+                    "torch.compile() is disabled on MPS due to Metal shader compilation errors. "
+                    "Model will run uncompiled. Consider using CUDA for optimized performance."
+                )
+                self.use_compilation = False  # Disable compilation for MPS
+            elif hasattr(torch, "compile") and callable(torch.compile):
+                try:
+                    logger.info("Compiling model with torch.compile() for optimization...")
+                    
+                    # Device-specific compilation modes
+                    if self.device == "cuda":
+                        # CUDA: Use "reduce-overhead" for best inference performance
+                        compile_mode = "reduce-overhead"
+                    else:
+                        # CPU: Use "reduce-overhead" for inference
+                        compile_mode = "reduce-overhead"
+                    
+                    model = torch.compile(
+                        model,
+                        mode=compile_mode,
+                        fullgraph=True,  # Compile entire model for maximum optimization
+                    )
+                    compilation_status = "SUCCESS"
+                    logger.info(
+                        f"Model compilation: {compilation_status} - "
+                        f"mode='{compile_mode}', device={self.device}"
+                    )
+                except Exception as e:
+                    compilation_status = "FAILED"
+                    compilation_reason = str(e)
+                    logger.warning(
+                        f"Model compilation failed (will use uncompiled model): {e}"
+                    )
+                    # Continue with uncompiled model - don't fail on compilation errors
+            else:
+                compilation_status = "UNAVAILABLE"
+                compilation_reason = "torch.compile() not available (requires PyTorch 2.0+)"
+                logger.warning(
+                    "torch.compile() not available (requires PyTorch 2.0+). "
+                    "Skipping model compilation."
+                )
+        else:
+            compilation_reason = "use_compilation=False"
+        
+        # Log final compilation status
+        if compilation_status != "SUCCESS":
+            logger.info(
+                f"Model compilation: {compilation_status} - "
+                f"device={self.device}, reason={compilation_reason}"
+            )
         
         # Create pipeline for easier inference
         # Note: transformers pipeline device parameter:
@@ -351,29 +417,28 @@ class CrossEncoder:
         ]
         
         # Execute all tasks concurrently
-        # asyncio.gather() maintains order of results and handles errors
-        try:
-            all_scores = await asyncio.gather(*tasks)
-            return list(all_scores)
-        except Exception as e:
-            logger.error(f"Error during batch scoring: {e}")
-            # Return partial results if some succeeded
-            # Gather with return_exceptions=True to get partial results
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            # Filter out exceptions and log them
-            valid_scores = []
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    logger.error(f"Error scoring pair {i}: {result}")
-                    # Return default scores for failed pairs
-                    valid_scores.append({
-                        "entailment": 0.0,
-                        "neutral": 0.0,
-                        "contradiction": 0.0
-                    })
-                else:
-                    valid_scores.append(result)
-            return valid_scores
+        # Use return_exceptions=True from the start to handle partial failures gracefully
+        # This avoids the "cannot reuse already awaited coroutine" error
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Filter out exceptions and log them
+        valid_scores = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(
+                    f"Error scoring pair {i}: {result}",
+                    exc_info=result
+                )
+                # Return default scores for failed pairs
+                valid_scores.append({
+                    "entailment": 0.0,
+                    "neutral": 0.0,
+                    "contradiction": 0.0
+                })
+            else:
+                valid_scores.append(result)
+        
+        return valid_scores
     
     def map_nli_to_confidence(
         self,

@@ -2,10 +2,33 @@
 
 import pytest
 import sys
+import warnings
 from pathlib import Path
 from unittest.mock import MagicMock, AsyncMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+
+@pytest.fixture(autouse=True)
+def suppress_pytorch_warnings():
+    """
+    Suppress known PyTorch Python 3.14 compatibility warnings.
+    
+    PyTorch uses torch.jit.script internally, which is deprecated in Python 3.14+.
+    These warnings are expected and will be resolved when PyTorch updates.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=".*torch.jit.script.*not supported in Python 3.14.*",
+            category=DeprecationWarning
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=".*torch.jit.script_method.*not supported in Python 3.14.*",
+            category=DeprecationWarning
+        )
+        yield
 
 
 @pytest.fixture
@@ -303,4 +326,47 @@ def sample_candidate_matches(sample_canonical_event, mock_embedding):
         candidates.append(candidate)
     
     return candidates
+
+
+@pytest.fixture(scope="module")
+def shared_cross_encoder():
+    """
+    Shared CrossEncoder instance across all tests in the module.
+    Loads model once, reuses for all integration tests.
+    
+    This fixture significantly reduces test suite runtime by avoiding
+    redundant model loading (saves ~150-200s for 5 tests).
+    
+    Scope: module - shared across all tests in test_integration_full_pipeline.py
+    
+    Returns:
+        CrossEncoder: Initialized and ready-to-use encoder instance
+    """
+    from matching.cross_encoder import CrossEncoder
+    import asyncio
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    encoder = CrossEncoder()
+    
+    try:
+        # Initialize model (one-time cost)
+        async def _init():
+            await encoder.initialize()
+            return encoder
+        
+        # Run async initialization synchronously for fixture
+        logger.info("Loading shared CrossEncoder for test module...")
+        encoder = asyncio.run(_init())
+        logger.info("Shared CrossEncoder loaded successfully")
+        
+        yield encoder
+        
+    except Exception as e:
+        logger.error(f"Failed to load shared CrossEncoder: {e}")
+        pytest.skip(f"Shared CrossEncoder failed to load: {e}")
+    finally:
+        # Optional cleanup (model stays in memory)
+        logger.info("Shared CrossEncoder fixture cleanup")
 
