@@ -119,7 +119,33 @@ class CrossEncoder:
                 )
                 
                 self._initialized = True
-                logger.info(f"Model loaded successfully on {self.device}")
+                # Verify actual device the model is on
+                actual_device = next(self._model.parameters()).device
+                device_type = str(actual_device.type)
+                device_index = actual_device.index if actual_device.index is not None else 0
+                
+                # Log detailed device information
+                logger.info(
+                    f"Model loaded successfully - "
+                    f"Configured device: {self.device}, "
+                    f"Actual device: {device_type}:{device_index}, "
+                    f"Device string: {actual_device}"
+                )
+                
+                # Log MPS availability if on Mac
+                if hasattr(torch.backends, "mps"):
+                    mps_available = torch.backends.mps.is_available()
+                    mps_built = torch.backends.mps.is_built()
+                    logger.info(
+                        f"MPS status - Available: {mps_available}, Built: {mps_built}"
+                    )
+                
+                # Log CUDA availability
+                if torch.cuda.is_available():
+                    logger.info(
+                        f"CUDA available - Device count: {torch.cuda.device_count()}, "
+                        f"Current device: {torch.cuda.current_device()}"
+                    )
                 
             except Exception as e:
                 logger.error(f"Failed to load cross-encoder model: {e}")
@@ -139,15 +165,38 @@ class CrossEncoder:
         model.eval()
         
         # Create pipeline for easier inference
-        # Map device to pipeline format: cuda -> 0, mps -> 0, cpu -> -1
-        pipeline_device = 0 if self.device in ("cuda", "mps") else -1
-        nli_pipeline = pipeline(
-            "text-classification",
-            model=model,
-            tokenizer=tokenizer,
-            device=pipeline_device,
-            return_all_scores=True,
-        )
+        # Note: transformers pipeline device parameter:
+        # - CUDA: device=0 (device index)
+        # - MPS: Don't pass device (model already on MPS via model.to())
+        # - CPU: device=-1 or don't pass it
+        # Note: task must be the first positional argument, not a keyword argument
+        if self.device == "cuda":
+            pipeline_device = 0
+            nli_pipeline = pipeline(
+                "text-classification",  # Positional argument
+                model=model,
+                tokenizer=tokenizer,
+                device=pipeline_device,
+                return_all_scores=True,
+            )
+        elif self.device == "mps":
+            # MPS: Don't pass device parameter - model is already on MPS
+            # The pipeline will use the device the model is already on
+            nli_pipeline = pipeline(
+                "text-classification",  # Positional argument
+                model=model,
+                tokenizer=tokenizer,
+                return_all_scores=True,
+            )
+        else:
+            # CPU
+            nli_pipeline = pipeline(
+                "text-classification",  # Positional argument
+                model=model,
+                tokenizer=tokenizer,
+                device=-1,
+                return_all_scores=True,
+            )
         
         self._tokenizer = tokenizer
         self._pipeline = nli_pipeline
@@ -197,9 +246,40 @@ class CrossEncoder:
             max_length=self.max_length,
         )
         
+        # Validate pipeline output format
+        if not isinstance(results, list):
+            error_msg = (
+                f"Pipeline returned unexpected type: {type(results)}. "
+                f"Expected list of dicts, got: {results}"
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        if not results:
+            error_msg = "Pipeline returned empty list"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        # Validate first result is a dict
+        if not isinstance(results[0], dict):
+            error_msg = (
+                f"Pipeline results[0] is not a dict: {type(results[0])}. "
+                f"Results: {results}"
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
         # Extract scores from pipeline output
         scores_dict = {}
         for result in results:
+            if not isinstance(result, dict):
+                logger.warning(f"Skipping invalid result (not a dict): {result}")
+                continue
+            
+            if "label" not in result or "score" not in result:
+                logger.warning(f"Skipping result missing 'label' or 'score': {result}")
+                continue
+            
             label = result["label"].lower()
             score = result["score"]
             
@@ -229,16 +309,22 @@ class CrossEncoder:
     
     async def score_batch_async(
         self,
-        pairs: List[Tuple[str, str]]
+        pairs: List[Tuple[str, str]],
+        max_concurrent: Optional[int] = None
     ) -> List[Dict[str, float]]:
         """
-        Score batch of text pairs (GPU-optimized).
+        Score semantic equivalence for a batch of text pairs (async).
+        
+        Processes pairs individually in parallel using asyncio.gather().
+        This ensures return_all_scores=True works correctly for each pair.
+        Uses concurrency control to limit resource usage.
         
         Args:
             pairs: List of (query_text, candidate_text) tuples
+            max_concurrent: Maximum number of concurrent tasks (default: batch_size)
             
         Returns:
-            List of NLI score dictionaries
+            List of dictionaries with NLI scores for each pair.
         """
         if not self._initialized:
             await self.initialize()
@@ -246,70 +332,48 @@ class CrossEncoder:
         if not pairs:
             return []
         
-        # Process in batches
-        all_scores = []
-        for i in range(0, len(pairs), self.batch_size):
-            batch = pairs[i:i + self.batch_size]
-            
-            # Run batch scoring in executor
-            loop = asyncio.get_event_loop()
-            batch_scores = await loop.run_in_executor(
-                None,
-                lambda: self._score_batch_sync(batch)
-            )
-            
-            all_scores.extend(batch_scores)
+        # Use batch_size as default concurrency limit
+        if max_concurrent is None:
+            max_concurrent = self.batch_size
         
-        return all_scores
-    
-    def _score_batch_sync(self, pairs: List[Tuple[str, str]]) -> List[Dict[str, float]]:
-        """Synchronous batch scoring (called from executor)."""
-        if not HAS_TRANSFORMERS:
-            raise ImportError("transformers library is required")
+        # Process pairs with concurrency limit using semaphore
+        semaphore = asyncio.Semaphore(max_concurrent)
         
-        # Format pairs as NLI task
-        formatted_texts = [f"{text1} [SEP] {text2}" for text1, text2 in pairs]
+        async def score_with_limit(text1: str, text2: str) -> Dict[str, float]:
+            """Score a single pair with concurrency limit."""
+            async with semaphore:
+                return await self.score_equivalence_async(text1, text2)
         
-        # Use pipeline for batch inference
-        results = self._pipeline(
-            formatted_texts,
-            truncation=True,
-            max_length=self.max_length,
-            batch_size=min(self.batch_size, len(pairs)),
-        )
+        # Create tasks for all pairs
+        tasks = [
+            score_with_limit(text1, text2)
+            for text1, text2 in pairs
+        ]
         
-        # Extract scores from pipeline output
-        scores_list = []
-        for result in results:
-            scores_dict = {}
-            for item in result:
-                label = item["label"].lower()
-                score = item["score"]
-                
-                # Map labels to standard NLI format
-                if "entail" in label:
-                    scores_dict["entailment"] = score
-                elif "neutral" in label:
-                    scores_dict["neutral"] = score
-                elif "contradict" in label:
-                    scores_dict["contradiction"] = score
-            
-            # Ensure all three labels exist
-            if "entailment" not in scores_dict:
-                scores_dict["entailment"] = 0.0
-            if "neutral" not in scores_dict:
-                scores_dict["neutral"] = 0.0
-            if "contradiction" not in scores_dict:
-                scores_dict["contradiction"] = 0.0
-            
-            # Normalize to ensure they sum to 1.0
-            total = sum(scores_dict.values())
-            if total > 0:
-                scores_dict = {k: v / total for k, v in scores_dict.items()}
-            
-            scores_list.append(scores_dict)
-        
-        return scores_list
+        # Execute all tasks concurrently
+        # asyncio.gather() maintains order of results and handles errors
+        try:
+            all_scores = await asyncio.gather(*tasks)
+            return list(all_scores)
+        except Exception as e:
+            logger.error(f"Error during batch scoring: {e}")
+            # Return partial results if some succeeded
+            # Gather with return_exceptions=True to get partial results
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Filter out exceptions and log them
+            valid_scores = []
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(f"Error scoring pair {i}: {result}")
+                    # Return default scores for failed pairs
+                    valid_scores.append({
+                        "entailment": 0.0,
+                        "neutral": 0.0,
+                        "contradiction": 0.0
+                    })
+                else:
+                    valid_scores.append(result)
+            return valid_scores
     
     def map_nli_to_confidence(
         self,

@@ -242,10 +242,12 @@ async def populate_qdrant(
     print(f"✅ Created {len(canonical_events)} canonical events")
     
     # Initialize components
+    # Use _test suffix to match test fixture collection name
+    test_collection_name = f"{config.QDRANT_COLLECTION_NAME}_test"
     index = QdrantIndex(
         url=config.QDRANT_URL,
         api_key=config.QDRANT_API_KEY,
-        collection_name=config.QDRANT_COLLECTION_NAME,
+        collection_name=test_collection_name,
         vector_size=config.QDRANT_VECTOR_SIZE
     )
     
@@ -289,7 +291,7 @@ async def populate_qdrant(
     
     print(f"\n✅ Successfully embedded and stored {len(embedded_events)} markets in Qdrant!")
     print(f"\n📊 Summary:")
-    print(f"   - Collection: {config.QDRANT_COLLECTION_NAME}")
+    print(f"   - Collection: {test_collection_name}")
     print(f"   - Vector size: {config.QDRANT_VECTOR_SIZE}")
     print(f"   - Total markets: {len(embedded_events)}")
     
