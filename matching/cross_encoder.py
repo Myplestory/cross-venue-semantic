@@ -7,6 +7,7 @@ Runs on local GPU, scores candidate pairs for semantic equivalence.
 
 import asyncio
 import logging
+import platform
 import re
 from typing import List, Tuple, Dict, Optional
 
@@ -174,9 +175,20 @@ class CrossEncoder:
         compilation_reason = None
         
         if self.use_compilation:
+            # Windows: torch.compile() requires MSVC cl.exe which is typically not in PATH.
+            # torch._inductor fails with "Compiler: cl is not found" during codegen.
+            # Disable compilation on Windows to avoid runtime errors.
+            if platform.system() == "Windows":
+                compilation_status = "DISABLED"
+                compilation_reason = "Windows platform - torch.compile() requires MSVC cl.exe which is not in PATH"
+                logger.warning(
+                    "torch.compile() is disabled on Windows due to missing MSVC compiler (cl.exe). "
+                    "Model will run uncompiled. Install Visual Studio Build Tools to enable compilation."
+                )
+                self.use_compilation = False  # Disable compilation for Windows
             # MPS: torch.compile() has known issues with Metal shader generation
             # Disable compilation on MPS until PyTorch fixes support
-            if self.device == "mps":
+            elif self.device == "mps":
                 compilation_status = "DISABLED"
                 compilation_reason = "MPS device - torch.compile() has known Metal shader compilation errors"
                 logger.warning(

@@ -178,16 +178,17 @@ async def test_full_pipeline_performance(real_qdrant_config, sample_canonical_ev
     import torch
     
     if torch.cuda.is_available():
-        # CUDA: Fastest, expect < 10s
-        max_elapsed = 10.0
+        # CUDA: Fastest, allow headroom for first-run kernel warmup
+        max_elapsed = 15.0
         device = "CUDA"
     elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         # MPS: Slower than CUDA, expect < 90s for full pipeline
         max_elapsed = 90.0
         device = "MPS"
     else:
-        # CPU: Slowest, expect < 120s
-        max_elapsed = 120.0
+        # CPU: Slowest, allow generous threshold for cross-platform compatibility
+        # Windows CPU-only PyTorch can be significantly slower than Mac
+        max_elapsed = 180.0
         device = "CPU"
     
     assert elapsed < max_elapsed, (
