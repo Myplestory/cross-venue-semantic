@@ -370,3 +370,90 @@ def shared_cross_encoder():
         # Optional cleanup (model stays in memory)
         logger.info("Shared CrossEncoder fixture cleanup")
 
+
+# Pair Verification Test Fixtures
+
+@pytest.fixture
+def sample_contract_spec_a():
+    """Sample ContractSpec A for pair verification."""
+    from canonicalization.contract_spec import ContractSpec, DateSpec, EntitySpec, ThresholdSpec
+    from datetime import datetime
+    
+    return ContractSpec(
+        statement="Will Bitcoin close above $60,000 on Coinbase by Dec 31, 2024?",
+        resolution_date=DateSpec(
+            date=datetime(2024, 12, 31),
+            is_deadline=True
+        ),
+        entities=[
+            EntitySpec(name="Bitcoin", entity_type="other", aliases=["BTC"]),
+            EntitySpec(name="Coinbase", entity_type="organization")
+        ],
+        thresholds=[
+            ThresholdSpec(value=60000.0, unit="dollars", comparison=">")
+        ],
+        resolution_criteria="Market resolves based on Coinbase BTC/USD closing price",
+        data_source="Coinbase",
+        outcome_labels=["Yes", "No"],
+        confidence=0.95
+    )
+
+
+@pytest.fixture
+def sample_contract_spec_b():
+    """Sample ContractSpec B (equivalent to A) for pair verification."""
+    from canonicalization.contract_spec import ContractSpec, DateSpec, EntitySpec, ThresholdSpec
+    from datetime import datetime
+    
+    return ContractSpec(
+        statement="Will BTC exceed $60,000 USD on Coinbase before December 31, 2024?",
+        resolution_date=DateSpec(
+            date=datetime(2024, 12, 31),
+            is_deadline=True
+        ),
+        entities=[
+            EntitySpec(name="BTC", entity_type="other", aliases=["Bitcoin"]),
+            EntitySpec(name="Coinbase", entity_type="organization")
+        ],
+        thresholds=[
+            ThresholdSpec(value=60000.0, unit="dollars", comparison=">")
+        ],
+        resolution_criteria="Resolves using Coinbase BTC/USD closing price",
+        data_source="Coinbase",
+        outcome_labels=["YES", "NO"],
+        confidence=0.92
+    )
+
+
+@pytest.fixture
+def sample_verified_match(sample_candidate_matches):
+    """Sample VerifiedMatch for pair verification."""
+    from matching.types import VerifiedMatch
+    
+    return VerifiedMatch(
+        candidate_match=sample_candidate_matches[0],
+        cross_encoder_score=0.85,
+        match_type="full_match",
+        nli_scores={
+            "entailment": 0.9,
+            "neutral": 0.05,
+            "contradiction": 0.05
+        },
+        primary_event_score=0.9,
+        secondary_clause_score=0.8
+    )
+
+
+@pytest.fixture
+def mock_pair_verifier():
+    """Mock PairVerifier for unit tests."""
+    from matching.pair_verifier import PairVerifier
+    from unittest.mock import AsyncMock, MagicMock
+    
+    verifier = PairVerifier()
+    verifier.initialize = AsyncMock()
+    verifier.verify_pair_async = AsyncMock()
+    verifier._initialized = True
+    
+    return verifier
+

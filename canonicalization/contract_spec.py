@@ -6,7 +6,7 @@ Used for LLM extraction and pair verification.
 """
 
 from pydantic import BaseModel, Field, field_validator, ConfigDict
-from typing import Optional, List
+from typing import Optional, List, Dict, Tuple
 from datetime import datetime
 
 
@@ -49,6 +49,14 @@ class ThresholdSpec(BaseModel):
     comparison: str = Field(
         default=">=",
         description="Comparison operator: '>=', '<=', '==', '>', '<'"
+    )
+    is_negated: bool = Field(
+        default=False,
+        description="True if threshold has negation modifier (e.g., 'not to exceed', 'unless')"
+    )
+    negation_context: Optional[str] = Field(
+        None,
+        description="Context around negation (e.g., 'unless X', 'except Y')"
     )
     
     @field_validator('comparison')
@@ -107,6 +115,10 @@ class ContractSpec(BaseModel):
     extraction_notes: Optional[str] = Field(
         None,
         description="LLM notes about extraction process"
+    )
+    evidence_spans: Dict[str, List[Tuple[int, int]]] = Field(
+        default_factory=dict,
+        description="Character spans (start, end) for each extracted field in canonical_text"
     )
     
     model_config = ConfigDict(

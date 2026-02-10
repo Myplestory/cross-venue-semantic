@@ -18,9 +18,13 @@ def real_cross_encoder():
 
 
 @pytest.fixture(scope="session")
-@pytest.mark.asyncio
 async def initialized_cross_encoder(real_cross_encoder):
-    """Initialize real CrossEncoder (session-scoped)."""
+    """
+    Initialize real CrossEncoder (session-scoped).
+    
+    Note: Marks on fixtures are deprecated in pytest 9+.
+    Use @pytest.mark.asyncio on test functions instead.
+    """
     try:
         await real_cross_encoder.initialize()
         return real_cross_encoder
