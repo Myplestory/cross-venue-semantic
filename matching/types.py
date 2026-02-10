@@ -6,7 +6,7 @@ Defines candidate match structures for retrieval phase output.
 
 from dataclasses import dataclass
 from datetime import datetime, UTC
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import sys
 from pathlib import Path
@@ -51,4 +51,50 @@ class CandidateMatch:
         self.similarity_score = max(0.0, min(1.0, self.similarity_score))
         
         self.embedding = list(self.embedding)
+
+
+@dataclass
+class VerifiedMatch:
+    """
+    A verified match after cross-encoder re-ranking.
+    
+    Output of cross-encoder phase, input to LLM verifier (optional).
+    """
+    candidate_match: CandidateMatch  # Original candidate from retrieval
+    cross_encoder_score: float  # Combined confidence (0-1)
+    match_type: str  # "full_match", "partial_match", "no_match"
+    nli_scores: Dict[str, Any]  # Raw entailment/neutral/contradiction scores
+    primary_event_score: float  # Primary event equivalence score
+    secondary_clause_score: Optional[float] = None  # Secondary clause equivalence score
+    verified_at: datetime = None
+    verification_metadata: Dict[str, Any] = None
+    
+    def __post_init__(self):
+        """Initialize defaults and validate scores."""
+        if self.verified_at is None:
+            self.verified_at = datetime.now(UTC)
+        
+        if self.verification_metadata is None:
+            self.verification_metadata = {}
+        
+        # Validate confidence score
+        EPSILON = 1e-6
+        if self.cross_encoder_score < -EPSILON or self.cross_encoder_score > 1.0 + EPSILON:
+            raise ValueError(
+                f"Cross-encoder score must be between 0.0 and 1.0, got {self.cross_encoder_score}"
+            )
+        self.cross_encoder_score = max(0.0, min(1.0, self.cross_encoder_score))
+        
+        # Validate match type
+        if self.match_type not in ["full_match", "partial_match", "no_match"]:
+            raise ValueError(f"Invalid match_type: {self.match_type}")
+        
+        # Validate primary event score
+        if not (0.0 <= self.primary_event_score <= 1.0):
+            self.primary_event_score = max(0.0, min(1.0, self.primary_event_score))
+        
+        # Validate secondary clause score if provided
+        if self.secondary_clause_score is not None:
+            if not (0.0 <= self.secondary_clause_score <= 1.0):
+                self.secondary_clause_score = max(0.0, min(1.0, self.secondary_clause_score))
 

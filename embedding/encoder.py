@@ -56,9 +56,14 @@ class EmbeddingEncoder:
         self.embedding_dim = embedding_dim
         self.instruction = instruction
         
-        # Device selection
+        # Device selection (supports CUDA, MPS for M4 Mac, or CPU)
         if device is None:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            if torch.cuda.is_available():
+                self.device = "cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                self.device = "mps"  # Metal Performance Shaders for M4 Mac
+            else:
+                self.device = "cpu"
         else:
             self.device = device
         

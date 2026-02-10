@@ -93,6 +93,33 @@ EMBEDDING_QUANTIZATION = get_env_bool("EMBEDDING_QUANTIZATION", False)
 # Cache Configuration
 EMBEDDING_CACHE_MAX_SIZE = get_env_int("EMBEDDING_CACHE_MAX_SIZE", 10000)
 
+# Cross-Encoder Configuration
+# Default: cross-encoder/nli-deberta-v3-large (NLI model for semantic equivalence)
+CROSS_ENCODER_MODEL = get_env("CROSS_ENCODER_MODEL", "cross-encoder/nli-deberta-v3-large")
+CROSS_ENCODER_USE_SENTENCE_TRANSFORMERS = get_env_bool("CROSS_ENCODER_USE_SENTENCE_TRANSFORMERS", True)
+CROSS_ENCODER_DEVICE = get_env("CROSS_ENCODER_DEVICE")  # None = auto-detect
+CROSS_ENCODER_BATCH_SIZE = get_env_int("CROSS_ENCODER_BATCH_SIZE", 8)
+CROSS_ENCODER_MAX_LENGTH = get_env_int("CROSS_ENCODER_MAX_LENGTH", 512)
+CROSS_ENCODER_QUANTIZATION = get_env_bool("CROSS_ENCODER_QUANTIZATION", False)
+
+# Confidence Scoring Thresholds
+def get_env_float(key: str, default: float) -> float:
+    """Get environment variable as float."""
+    value = os.getenv(key)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+CROSS_ENCODER_ENTAILMENT_THRESHOLD = get_env_float("CROSS_ENCODER_ENTAILMENT_THRESHOLD", 0.7)
+CROSS_ENCODER_NEUTRAL_THRESHOLD = get_env_float("CROSS_ENCODER_NEUTRAL_THRESHOLD", 0.3)
+CROSS_ENCODER_SCORE_THRESHOLD = get_env_float("CROSS_ENCODER_SCORE_THRESHOLD", 0.7)
+CROSS_ENCODER_PRIMARY_WEIGHT = get_env_float("CROSS_ENCODER_PRIMARY_WEIGHT", 0.7)
+CROSS_ENCODER_SECONDARY_WEIGHT = get_env_float("CROSS_ENCODER_SECONDARY_WEIGHT", 0.3)
+CROSS_ENCODER_TOP_K = get_env_int("CROSS_ENCODER_TOP_K", 10)
+
 
 def print_config_summary() -> None:
     """
@@ -111,4 +138,9 @@ def print_config_summary() -> None:
     print(f"  EMBEDDING_DIM: {EMBEDDING_DIM}")
     print(f"  EMBEDDING_QUANTIZATION: {EMBEDDING_QUANTIZATION}")
     print(f"  CACHE_MAX_SIZE: {EMBEDDING_CACHE_MAX_SIZE}")
+    print(f"  CROSS_ENCODER_MODEL: {CROSS_ENCODER_MODEL}")
+    print(f"  CROSS_ENCODER_DEVICE: {CROSS_ENCODER_DEVICE or 'auto-detect'}")
+    print(f"  CROSS_ENCODER_BATCH_SIZE: {CROSS_ENCODER_BATCH_SIZE}")
+    print(f"  CROSS_ENCODER_QUANTIZATION: {CROSS_ENCODER_QUANTIZATION}")
+    print(f"  CROSS_ENCODER_SCORE_THRESHOLD: {CROSS_ENCODER_SCORE_THRESHOLD}")
     print()
