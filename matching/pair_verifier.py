@@ -585,26 +585,29 @@ class PairVerifier:
         - not_equivalent: Critical mismatch or low confidence (weighted_score < 0.5)
         - needs_review: Ambiguous or partial matches (0.5 <= weighted_score < 0.9)
         """
+        # Floating-point tolerance for threshold comparisons
+        EPSILON = 1e-9
+        
         # Critical mismatch check (early exit)
         if (
-            entity_score < self.entity_tolerance * 0.5 or
-            threshold_score < 0.3 or
-            date_score < 0.3
+            entity_score < self.entity_tolerance * 0.5 - EPSILON or
+            threshold_score < 0.3 - EPSILON or
+            date_score < 0.3 - EPSILON
         ):
             return ("not_equivalent", weighted_score)
         
         # High confidence equivalent
         if (
-            weighted_score >= self.equivalent_threshold and
-            entity_score >= self.entity_tolerance and
-            threshold_score >= 0.8 and
-            date_score >= 0.8 and
-            cross_encoder_score >= 0.7  # Cross-encoder must also be high
+            weighted_score >= self.equivalent_threshold - EPSILON and
+            entity_score >= self.entity_tolerance - EPSILON and
+            threshold_score >= 0.8 - EPSILON and
+            date_score >= 0.8 - EPSILON and
+            cross_encoder_score >= 0.7 - EPSILON  # Cross-encoder must also be high
         ):
             return ("equivalent", weighted_score)
         
         # Low confidence not equivalent
-        if weighted_score < self.not_equivalent_threshold:
+        if weighted_score < self.not_equivalent_threshold - EPSILON:
             return ("not_equivalent", weighted_score)
         
         # Needs review (ambiguous)

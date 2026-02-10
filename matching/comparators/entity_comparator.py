@@ -84,17 +84,23 @@ class EntityComparator:
         set_a = build_entity_set(entities_a)
         set_b = build_entity_set(entities_b)
         
-        # Find matches
-        matched = 0
+        # Find matches — track by object identity to avoid double-counting
+        # when aliases create multiple keys for the same entity
+        matched_a_ids = set()  # id() of matched entities from A
+        matched_b_ids = set()  # id() of matched entities from B
         total = max(len(entities_a), len(entities_b))
         match_details = []
         
         for name_a, entity_a in set_a.items():
             if name_a in set_b:
                 entity_b = set_b[name_a]
+                # Skip if either entity already matched (alias overlap)
+                if id(entity_a) in matched_a_ids or id(entity_b) in matched_b_ids:
+                    continue
+                matched_a_ids.add(id(entity_a))
+                matched_b_ids.add(id(entity_b))
                 # Check entity type match
                 type_match = entity_a.entity_type == entity_b.entity_type
-                matched += 1
                 match_details.append({
                     "name": entity_a.name,
                     "type_match": type_match,
@@ -103,6 +109,7 @@ class EntityComparator:
                 })
         
         # Calculate match score
+        matched = len(matched_a_ids)
         if total == 0:
             score = 1.0
         else:

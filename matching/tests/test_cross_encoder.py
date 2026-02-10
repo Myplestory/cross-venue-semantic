@@ -14,7 +14,7 @@ async def test_cross_encoder_initialization_defaults():
     """Test cross-encoder initialization with default parameters."""
     encoder = CrossEncoder()
     
-    assert encoder.model_name == "microsoft/deberta-v3-large"
+    assert encoder.model_name == "cross-encoder/nli-deberta-v3-large"
     assert encoder.batch_size == 8
     assert encoder.max_length == 512
     assert encoder.use_quantization is False

@@ -9,7 +9,8 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from matching.pair_verifier import PairVerifier
-from matching.types import VerifiedMatch, CandidateMatch
+from matching.types import VerifiedMatch, CandidateMatch, VerifiedPair
+from canonicalization.contract_spec import ContractSpec
 from .fixtures.golden_dataset import get_golden_dataset, get_edge_case_dataset
 
 
@@ -154,9 +155,11 @@ async def test_edge_cases():
         mock_candidate = MagicMock()
         mock_candidate.canonical_event = MagicMock()
         
+        # Use per-case cross_encoder_score if specified, else default to 0.7
+        ce_score = case.get("cross_encoder_score", 0.7)
         verified_match = VerifiedMatch(
             candidate_match=mock_candidate,
-            cross_encoder_score=0.7,
+            cross_encoder_score=ce_score,
             match_type="partial_match",
             nli_scores={"entailment": 0.6, "neutral": 0.3, "contradiction": 0.1},
             primary_event_score=0.6

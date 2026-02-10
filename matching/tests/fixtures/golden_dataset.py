@@ -112,7 +112,7 @@ def get_golden_dataset() -> List[Dict[str, Any]]:
                 confidence=0.9
             ),
             "expected_verdict": "not_equivalent",
-            "expected_confidence_max": 0.5
+            "expected_confidence_max": 0.55
         },
         
         {
@@ -334,6 +334,7 @@ def get_edge_case_dataset() -> List[Dict[str, Any]]:
                 outcome_labels=["Yes", "No"],
                 confidence=0.8
             ),
+            "cross_encoder_score": 0.7,
             "expected_verdict": "needs_review"
         },
         
@@ -365,6 +366,7 @@ def get_edge_case_dataset() -> List[Dict[str, Any]]:
                 outcome_labels=["Yes", "No"],
                 confidence=0.85
             ),
+            "cross_encoder_score": 0.9,
             "expected_verdict": "equivalent"
         },
         

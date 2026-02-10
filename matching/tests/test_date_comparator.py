@@ -44,7 +44,7 @@ async def test_compare_dates_one_missing():
     
     score, details = await comparator.compare_dates(date_a, None)
     
-    assert score == 0.0
+    assert score == 0.3  # Ambiguous, not critical mismatch
     assert details["match"] is False
 
 
@@ -114,7 +114,7 @@ async def test_compare_dates_outside_tolerance():
     
     score, details = await comparator.compare_dates(date_a, date_b, tolerance_days=1)
     
-    assert score == 0.0
+    assert score == 0.4  # 15 days apart: within 30-day band
     assert details["match"] is False
 
 

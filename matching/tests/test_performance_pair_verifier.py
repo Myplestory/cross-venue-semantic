@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from matching.pair_verifier import PairVerifier
-from matching.types import VerifiedMatch, CandidateMatch
+from matching.types import VerifiedMatch, CandidateMatch, VerifiedPair
 from .fixtures.sample_contract_specs import (
     create_bitcoin_spec_60k,
     create_bitcoin_spec_80k

@@ -63,14 +63,14 @@ class DateComparator:
                 "score": 0.5
             })
         
-        # One date missing
+        # One date missing — ambiguous, not a critical mismatch
         if date_a is None or date_b is None:
-            return (0.0, {
+            return (0.3, {
                 "match": False,
                 "reason": "one_missing",
                 "date_a": date_a.date.isoformat() if date_a else None,
                 "date_b": date_b.date.isoformat() if date_b else None,
-                "score": 0.0
+                "score": 0.3
             })
         
         # Calculate date difference
@@ -79,15 +79,19 @@ class DateComparator:
         # Check is_deadline consistency
         deadline_match = date_a.is_deadline == date_b.is_deadline
         
-        # Calculate match score
+        # Calculate match score — graduated to avoid false critical mismatches
         if date_diff == 0:
             score = 1.0
         elif date_diff <= tolerance_days:
             score = 0.9
         elif date_diff <= 7:
             score = 0.7
+        elif date_diff <= 30:
+            score = 0.4
         else:
-            score = 0.0
+            # Large date difference — ambiguous but not zero (avoids
+            # triggering critical mismatch in verdict logic)
+            score = 0.3
         
         # Penalize deadline mismatch
         if not deadline_match:
