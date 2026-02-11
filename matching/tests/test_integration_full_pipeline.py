@@ -4,9 +4,12 @@ Tests the complete flow: Retrieval → Cross-Encoder → Reranker
 with real Qdrant and real models.
 """
 
+import gc
 import pytest
 import asyncio
 from datetime import datetime, UTC
+
+import torch
 
 from matching.retriever import CandidateRetriever
 from matching.reranker import CandidateReranker
@@ -16,6 +19,23 @@ from embedding.index import QdrantIndex
 from embedding.types import EmbeddedEvent
 from discovery.types import VenueType
 import config
+
+
+def _flush_gpu_memory() -> None:
+    """
+    Force GPU memory cleanup after a model reference has been deleted.
+
+    Must be called AFTER ``del encoder`` in the caller's scope so that
+    the reference count drops to zero before GC runs.  Follows the
+    canonical PyTorch pattern: del reference → gc.collect() → empty_cache().
+
+    Required on GPUs with limited VRAM (e.g. 8 GB RTX 3070) to avoid
+    memory contention when a second model (cross-encoder) runs immediately
+    after the first (embedding encoder).
+    """
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 @pytest.mark.integration
@@ -46,6 +66,10 @@ async def test_full_pipeline_retrieval_to_rerank(real_qdrant_config, sample_cano
         embedding_model=config.EMBEDDING_MODEL,
         embedding_dim=config.EMBEDDING_DIM
     )
+    
+    # Free embedding model VRAM before cross-encoder reranking
+    del encoder
+    _flush_gpu_memory()
     
     # Phase 1: Retrieval
     retriever = CandidateRetriever(index, default_top_k=10, default_score_threshold=0.0)
@@ -101,6 +125,10 @@ async def test_full_pipeline_cross_venue_matching(real_qdrant_config, sample_can
         embedding_model=config.EMBEDDING_MODEL,
         embedding_dim=config.EMBEDDING_DIM
     )
+    
+    # Free embedding model VRAM before cross-encoder reranking
+    del encoder
+    _flush_gpu_memory()
     
     # Retrieve with cross-venue (exclude query venue)
     retriever = CandidateRetriever(index, default_top_k=10, default_score_threshold=0.0)
@@ -158,6 +186,10 @@ async def test_full_pipeline_performance(real_qdrant_config, sample_canonical_ev
         embedding_dim=config.EMBEDDING_DIM
     )
     
+    # Free embedding model VRAM before timed cross-encoder section
+    del encoder
+    _flush_gpu_memory()
+    
     retriever = CandidateRetriever(index, default_top_k=10)
     await retriever.initialize()
     
@@ -175,8 +207,6 @@ async def test_full_pipeline_performance(real_qdrant_config, sample_canonical_ev
     
     # Device-aware performance thresholds (industry standard)
     # Different hardware has different performance characteristics
-    import torch
-    
     if torch.cuda.is_available():
         # CUDA: Fastest, allow headroom for first-run kernel warmup
         max_elapsed = 15.0
@@ -227,6 +257,10 @@ async def test_full_pipeline_verified_match_structure(real_qdrant_config, sample
         embedding_model=config.EMBEDDING_MODEL,
         embedding_dim=config.EMBEDDING_DIM
     )
+    
+    # Free embedding model VRAM before cross-encoder reranking
+    del encoder
+    _flush_gpu_memory()
     
     retriever = CandidateRetriever(index, default_top_k=5)
     await retriever.initialize()
@@ -287,6 +321,10 @@ async def test_full_pipeline_score_consistency(real_qdrant_config, sample_canoni
         embedding_model=config.EMBEDDING_MODEL,
         embedding_dim=config.EMBEDDING_DIM
     )
+    
+    # Free embedding model VRAM before cross-encoder reranking
+    del encoder
+    _flush_gpu_memory()
     
     retriever = CandidateRetriever(index, default_top_k=5)
     await retriever.initialize()

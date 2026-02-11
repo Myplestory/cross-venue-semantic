@@ -79,68 +79,119 @@ class CandidateReranker:
     ) -> List[VerifiedMatch]:
         """
         Re-rank candidates using cross-encoder.
-        
+
+        Two-phase batch scoring:
+        1. All primary events scored in one batch GPU call
+        2. All secondary clause pairs across all qualifying candidates
+           collected and scored in one batch GPU call
+
+        Total GPU batch calls: 2 (regardless of candidate count).
+
         Args:
             query_event: Query market canonical event
             candidates: List of candidate matches from retrieval
-            
+
         Returns:
             List of verified matches, sorted by confidence (highest first)
         """
         if not candidates:
             return []
-        
-        # Extract primary event and secondary clauses from query
+
         query_text = query_event.canonical_text
         query_primary = self.cross_encoder.extract_primary_event(query_text)
         query_clauses = self.cross_encoder.extract_secondary_clauses(query_text)
-        
-        # Score primary events for all candidates
+
         candidate_texts = [c.canonical_event.canonical_text for c in candidates]
         candidate_primaries = [
             self.cross_encoder.extract_primary_event(text) for text in candidate_texts
         ]
-        
-        # Batch score primary events
+
+        # Phase 1: batch score all primary events (1 GPU batch call)
         primary_pairs = [(query_primary, cp) for cp in candidate_primaries]
         primary_nli_scores = await self.cross_encoder.score_batch_async(primary_pairs)
-        
-        # Process each candidate
+
+        # Phase 2: identify candidates needing secondary scoring
+        primary_results = []
+        secondary_needed_indices: List[int] = []
+        candidate_clauses_map: dict[int, List[str]] = {}
+
+        for i in range(len(candidates)):
+            primary_nli = primary_nli_scores[i]
+            primary_confidence, primary_match_type = (
+                self.cross_encoder.map_nli_to_confidence(primary_nli)
+            )
+            primary_results.append((primary_confidence, primary_match_type, primary_nli))
+
+            # Only evaluate secondary clauses above early-stopping threshold
+            if primary_confidence >= self.score_threshold * 0.5 and query_clauses:
+                cand_clauses = self.cross_encoder.extract_secondary_clauses(
+                    candidates[i].canonical_event.canonical_text
+                )
+                if cand_clauses:
+                    secondary_needed_indices.append(i)
+                    candidate_clauses_map[i] = cand_clauses
+
+        # Phase 3: batch score ALL secondary clause pairs in one GPU call
+        secondary_scores: dict[int, float] = {}
+
+        if secondary_needed_indices and query_clauses:
+            all_clause_pairs: List[tuple[str, str]] = []
+            # (candidate_idx, n_query_clauses, n_candidate_clauses) for result distribution
+            pair_layout: List[tuple[int, int, int]] = []
+
+            for idx in secondary_needed_indices:
+                cand_clauses = candidate_clauses_map[idx]
+                pairs_for_candidate = [
+                    (qc, cc) for qc in query_clauses for cc in cand_clauses
+                ]
+                all_clause_pairs.extend(pairs_for_candidate)
+                pair_layout.append((idx, len(query_clauses), len(cand_clauses)))
+
+            # 1 GPU batch call for all secondary clause pairs across all candidates
+            all_clause_nli = await self.cross_encoder.score_batch_async(all_clause_pairs)
+
+            # Distribute results: best-match per query clause per candidate
+            offset = 0
+            for cand_idx, n_query, n_cand in pair_layout:
+                n_pairs = n_query * n_cand
+                clause_nli_slice = all_clause_nli[offset:offset + n_pairs]
+                offset += n_pairs
+
+                clause_scores = []
+                for q_idx in range(n_query):
+                    best_match = 0.0
+                    for c_idx in range(n_cand):
+                        flat_idx = q_idx * n_cand + c_idx
+                        confidence, _ = self.cross_encoder.map_nli_to_confidence(
+                            clause_nli_slice[flat_idx]
+                        )
+                        best_match = max(best_match, confidence)
+                    clause_scores.append(best_match)
+
+                secondary_scores[cand_idx] = (
+                    sum(clause_scores) / len(clause_scores) if clause_scores else 0.5
+                )
+
+        # Phase 4: assemble VerifiedMatch objects
         verified_matches = []
         for i, candidate in enumerate(candidates):
-            primary_nli = primary_nli_scores[i]
-            primary_confidence, primary_match_type = self.cross_encoder.map_nli_to_confidence(primary_nli)
-            
-            # Early stopping: if primary score is too low, skip secondary evaluation
+            primary_confidence, primary_match_type, primary_nli = primary_results[i]
+
             if primary_confidence < self.score_threshold * 0.5:
-                # Still create VerifiedMatch but mark as no_match
                 combined_score = primary_confidence
                 match_type = "no_match"
                 secondary_score = None
             else:
-                # Evaluate secondary clauses if they exist
-                candidate_clauses = self.cross_encoder.extract_secondary_clauses(
-                    candidate.canonical_event.canonical_text
-                )
-                
-                if query_clauses and candidate_clauses:
-                    secondary_score = await self.cross_encoder.score_secondary_clauses_async(
-                        query_clauses, candidate_clauses
-                    )
-                else:
-                    # No secondary clauses, use primary score only
-                    secondary_score = None
-                
-                # Combine scores
+                secondary_score = secondary_scores.get(i)
+
                 if secondary_score is not None:
                     combined_score = (
-                        self.primary_weight * primary_confidence +
-                        self.secondary_weight * secondary_score
+                        self.primary_weight * primary_confidence
+                        + self.secondary_weight * secondary_score
                     )
                 else:
                     combined_score = primary_confidence
-                
-                # Determine final match type
+
                 if combined_score >= self.score_threshold:
                     if primary_confidence > self.cross_encoder.entailment_threshold:
                         match_type = "full_match"
@@ -148,9 +199,8 @@ class CandidateReranker:
                         match_type = "partial_match"
                 else:
                     match_type = "no_match"
-            
-            # Create VerifiedMatch
-            verified_match = VerifiedMatch(
+
+            verified_matches.append(VerifiedMatch(
                 candidate_match=candidate,
                 cross_encoder_score=combined_score,
                 match_type=match_type,
@@ -160,20 +210,13 @@ class CandidateReranker:
                 verification_metadata={
                     "primary_match_type": primary_match_type,
                     "model": self.cross_encoder.model_name,
-                }
-            )
-            
-            verified_matches.append(verified_match)
-        
-        # Filter by threshold and sort by confidence
+                },
+            ))
+
         filtered_matches = [
             vm for vm in verified_matches
             if vm.cross_encoder_score >= self.score_threshold
         ]
-        
-        # Sort by confidence (highest first)
         filtered_matches.sort(key=lambda x: x.cross_encoder_score, reverse=True)
-        
-        # Return top-k
         return filtered_matches[:self.top_k]
 

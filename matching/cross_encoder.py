@@ -85,6 +85,7 @@ class CrossEncoder:
         self._model: Optional[AutoModelForSequenceClassification] = None
         self._tokenizer: Optional[AutoTokenizer] = None
         self._pipeline: Optional[pipeline] = None
+        self._id2label: Optional[Dict[int, str]] = None
         self._model_lock = asyncio.Lock()
         self._initialized = False
         
@@ -167,6 +168,10 @@ class CrossEncoder:
         )
         model.to(self.device)
         model.eval()
+        
+        # Capture label mapping before potential torch.compile() wrapping
+        # DeBERTa-v3-large-mnli labels: {0: "entailment", 1: "neutral", 2: "contradiction"}
+        self._id2label = model.config.id2label
         
         # OPTIMIZATION: Compile model for faster inference
         # torch.compile() is available in PyTorch 2.0+
@@ -281,6 +286,39 @@ class CrossEncoder:
         
         return model
     
+    def _parse_nli_results(self, results: list) -> Dict[str, float]:
+        """
+        Parse NLI pipeline output into normalized {entailment, neutral, contradiction} dict.
+
+        Shared between single-pair and batch scoring paths.
+        """
+        scores_dict: Dict[str, float] = {}
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            if "label" not in result or "score" not in result:
+                continue
+
+            label = result["label"].lower()
+            score = result["score"]
+
+            # DeBERTa-v3-large-mnli labels: ENTAILMENT, NEUTRAL, CONTRADICTION
+            if "entail" in label:
+                scores_dict["entailment"] = score
+            elif "neutral" in label:
+                scores_dict["neutral"] = score
+            elif "contradict" in label:
+                scores_dict["contradiction"] = score
+
+        for key in ("entailment", "neutral", "contradiction"):
+            scores_dict.setdefault(key, 0.0)
+
+        total = sum(scores_dict.values())
+        if total > 0:
+            scores_dict = {k: v / total for k, v in scores_dict.items()}
+
+        return scores_dict
+
     async def score_equivalence_async(
         self,
         query_text: str,
@@ -288,103 +326,96 @@ class CrossEncoder:
     ) -> Dict[str, float]:
         """
         Score semantic equivalence between two texts (async).
-        
+
         Args:
             query_text: Query market canonical text
             candidate_text: Candidate market canonical text
-            
+
         Returns:
             Dictionary with NLI scores: {"entailment": 0.9, "neutral": 0.05, "contradiction": 0.05}
         """
         if not self._initialized:
             await self.initialize()
-        
-        # Run scoring in executor (CPU-bound GPU operations)
-        loop = asyncio.get_event_loop()
+
+        loop = asyncio.get_running_loop()
         scores = await loop.run_in_executor(
             None,
             lambda: self._score_pair_sync(query_text, candidate_text)
         )
-        
+
         return scores
-    
+
     def _score_pair_sync(self, text1: str, text2: str) -> Dict[str, float]:
-        """Synchronous pair scoring (called from executor)."""
+        """Synchronous single-pair scoring (called from executor)."""
         if not HAS_TRANSFORMERS:
             raise ImportError("transformers library is required")
-        
-        # Format as NLI task: premise [SEP] hypothesis
-        # For DeBERTa-v3-large-mnli, format is typically: text1 [SEP] text2
+
         formatted_text = f"{text1} [SEP] {text2}"
-        
-        # Use pipeline for inference
+
         results = self._pipeline(
             formatted_text,
             truncation=True,
             max_length=self.max_length,
         )
-        
-        # Validate pipeline output format
-        if not isinstance(results, list):
-            error_msg = (
-                f"Pipeline returned unexpected type: {type(results)}. "
-                f"Expected list of dicts, got: {results}"
-            )
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-        
-        if not results:
-            error_msg = "Pipeline returned empty list"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-        
-        # Validate first result is a dict
-        if not isinstance(results[0], dict):
-            error_msg = (
-                f"Pipeline results[0] is not a dict: {type(results[0])}. "
-                f"Results: {results}"
-            )
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-        
-        # Extract scores from pipeline output
-        scores_dict = {}
-        for result in results:
-            if not isinstance(result, dict):
-                logger.warning(f"Skipping invalid result (not a dict): {result}")
-                continue
-            
-            if "label" not in result or "score" not in result:
-                logger.warning(f"Skipping result missing 'label' or 'score': {result}")
-                continue
-            
-            label = result["label"].lower()
-            score = result["score"]
-            
-            # Map labels to standard NLI format
-            # DeBERTa-v3-large-mnli typically uses: ENTAILMENT, NEUTRAL, CONTRADICTION
-            if "entail" in label:
-                scores_dict["entailment"] = score
-            elif "neutral" in label:
-                scores_dict["neutral"] = score
-            elif "contradict" in label:
-                scores_dict["contradiction"] = score
-        
-        # Ensure all three labels exist (normalize if missing)
-        if "entailment" not in scores_dict:
-            scores_dict["entailment"] = 0.0
-        if "neutral" not in scores_dict:
-            scores_dict["neutral"] = 0.0
-        if "contradiction" not in scores_dict:
-            scores_dict["contradiction"] = 0.0
-        
-        # Normalize to ensure they sum to 1.0 (in case of rounding issues)
-        total = sum(scores_dict.values())
-        if total > 0:
-            scores_dict = {k: v / total for k, v in scores_dict.items()}
-        
-        return scores_dict
-    
+
+        if not isinstance(results, list) or not results:
+            raise ValueError(f"Pipeline returned unexpected output: {results}")
+
+        # return_all_scores=True wraps single input in an extra list
+        if isinstance(results[0], list):
+            results = results[0]
+
+        return self._parse_nli_results(results)
+
+    def _score_batch_sync(self, pairs: List[Tuple[str, str]]) -> List[Dict[str, float]]:
+        """
+        Batch scoring via direct tokenizer + model.forward().
+
+        Bypasses HuggingFace pipeline's Dataset/DataLoader overhead which
+        causes severe performance regression on Windows CUDA. Tokenizes and
+        runs forward passes in micro-batches of self.batch_size for GPU
+        memory safety. O(ceil(N/batch_size)) GPU forward passes.
+
+        Args:
+            pairs: List of (text1, text2) tuples to score.
+
+        Returns:
+            List of NLI score dicts, one per pair.
+        """
+        if not HAS_TRANSFORMERS:
+            raise ImportError("transformers library is required")
+
+        all_scores: List[Dict[str, float]] = []
+
+        # Process in micro-batches to stay within GPU memory
+        for start in range(0, len(pairs), self.batch_size):
+            batch_pairs = pairs[start:start + self.batch_size]
+            formatted_texts = [f"{t1} [SEP] {t2}" for t1, t2 in batch_pairs]
+
+            # Direct tokenization — no Dataset/DataLoader overhead
+            inputs = self._tokenizer(
+                formatted_texts,
+                padding=True,
+                truncation=True,
+                max_length=self.max_length,
+                return_tensors="pt",
+            ).to(self.device)
+
+            # Single forward pass for entire micro-batch
+            with torch.no_grad():
+                outputs = self._model(**inputs)
+                probs = torch.softmax(outputs.logits, dim=-1)
+
+            # Map label indices → NLI score dicts via stored id2label
+            for i in range(probs.shape[0]):
+                results_list = [
+                    {"label": self._id2label[j], "score": probs[i, j].item()}
+                    for j in range(probs.shape[1])
+                ]
+                all_scores.append(self._parse_nli_results(results_list))
+
+        return all_scores
+
     async def score_batch_async(
         self,
         pairs: List[Tuple[str, str]],
@@ -392,65 +423,36 @@ class CrossEncoder:
     ) -> List[Dict[str, float]]:
         """
         Score semantic equivalence for a batch of text pairs (async).
-        
-        Processes pairs individually in parallel using asyncio.gather().
-        This ensures return_all_scores=True works correctly for each pair.
-        Uses concurrency control to limit resource usage.
-        
+
+        Uses true batch inference — single executor dispatch, HuggingFace
+        pipeline handles GPU micro-batching internally. O(ceil(N/batch_size))
+        GPU forward passes instead of O(N) separate executor calls.
+
         Args:
             pairs: List of (query_text, candidate_text) tuples
-            max_concurrent: Maximum number of concurrent tasks (default: batch_size)
-            
+            max_concurrent: Kept for API compatibility, unused
+
         Returns:
             List of dictionaries with NLI scores for each pair.
         """
         if not self._initialized:
             await self.initialize()
-        
+
         if not pairs:
             return []
-        
-        # Use batch_size as default concurrency limit
-        if max_concurrent is None:
-            max_concurrent = self.batch_size
-        
-        # Process pairs with concurrency limit using semaphore
-        semaphore = asyncio.Semaphore(max_concurrent)
-        
-        async def score_with_limit(text1: str, text2: str) -> Dict[str, float]:
-            """Score a single pair with concurrency limit."""
-            async with semaphore:
-                return await self.score_equivalence_async(text1, text2)
-        
-        # Create tasks for all pairs
-        tasks = [
-            score_with_limit(text1, text2)
-            for text1, text2 in pairs
-        ]
-        
-        # Execute all tasks concurrently
-        # Use return_exceptions=True from the start to handle partial failures gracefully
-        # This avoids the "cannot reuse already awaited coroutine" error
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Filter out exceptions and log them
-        valid_scores = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.error(
-                    f"Error scoring pair {i}: {result}",
-                    exc_info=result
-                )
-                # Return default scores for failed pairs
-                valid_scores.append({
-                    "entailment": 0.0,
-                    "neutral": 0.0,
-                    "contradiction": 0.0
-                })
-            else:
-                valid_scores.append(result)
-        
-        return valid_scores
+
+        default_scores = {"entailment": 0.0, "neutral": 0.0, "contradiction": 0.0}
+
+        loop = asyncio.get_running_loop()
+        try:
+            results = await loop.run_in_executor(
+                None,
+                lambda: self._score_batch_sync(pairs)
+            )
+            return results
+        except Exception as e:
+            logger.error(f"Batch scoring failed, returning defaults: {e}", exc_info=True)
+            return [dict(default_scores) for _ in pairs]
     
     def map_nli_to_confidence(
         self,
@@ -572,30 +574,38 @@ class CrossEncoder:
     ) -> float:
         """
         Score equivalence of secondary clauses between two markets.
-        
+
+        Collects all n×m clause pair combinations and scores in a single
+        batch GPU call, then computes best-match per query clause.
+
         Args:
             query_clauses: List of clauses from query market
             candidate_clauses: List of clauses from candidate market
-            
+
         Returns:
             Confidence score (0-1) for clause equivalence
         """
         if not query_clauses or not candidate_clauses:
-            # If either has no clauses, return neutral score
             return 0.5
-        
-        # Score each query clause against all candidate clauses
+
+        # O(n×m) pairs scored in one batch call instead of n×m sequential calls
+        all_pairs = [
+            (qc, cc)
+            for qc in query_clauses
+            for cc in candidate_clauses
+        ]
+
+        all_nli_scores = await self.score_batch_async(all_pairs)
+
+        # Best-match per query clause from the flat results
+        n_candidates = len(candidate_clauses)
         clause_scores = []
-        for query_clause in query_clauses:
+        for q_idx in range(len(query_clauses)):
             best_match = 0.0
-            for candidate_clause in candidate_clauses:
-                # Score pair
-                nli_scores = await self.score_equivalence_async(query_clause, candidate_clause)
-                confidence, _ = self.map_nli_to_confidence(nli_scores)
+            for c_idx in range(n_candidates):
+                flat_idx = q_idx * n_candidates + c_idx
+                confidence, _ = self.map_nli_to_confidence(all_nli_scores[flat_idx])
                 best_match = max(best_match, confidence)
             clause_scores.append(best_match)
-        
-        # Average of best matches
-        if clause_scores:
-            return sum(clause_scores) / len(clause_scores)
-        return 0.5
+
+        return sum(clause_scores) / len(clause_scores) if clause_scores else 0.5
