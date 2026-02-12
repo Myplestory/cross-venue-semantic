@@ -273,15 +273,24 @@ def embedding_encoder():
 @pytest.fixture(scope="module")
 def cross_encoder_model():
     """
-    Real cross-encoder (DeBERTa-v3-large-mnli) on CPU.
+    Real cross-encoder (DeBERTa-v3-large-mnli).
 
     Module-scoped to avoid reloading.
+
+    Device and quantization follow ``.env`` via ``config``:
+    - ``CROSS_ENCODER_DEVICE``: ``cuda`` | ``cpu`` | unset (auto-detect)
+    - ``CROSS_ENCODER_QUANTIZATION``: ``true`` for INT8, ``false`` for FP32
+
+    8 GB GPU (RTX 3070): set both ``EMBEDDING_QUANTIZATION=true`` and
+    ``CROSS_ENCODER_QUANTIZATION=true`` so Qwen INT8 (~4.5 GB) + DeBERTa
+    INT8 (~0.5 GB) fit with headroom for activations (~6.5 GB total).
     """
     encoder = CrossEncoder(
         model_name=config.CROSS_ENCODER_MODEL,
-        device="cpu",  # Explicit CPU to coexist with embedding on CUDA
+        device=config.CROSS_ENCODER_DEVICE,  # Respect .env (default: auto-detect → CUDA)
         batch_size=config.CROSS_ENCODER_BATCH_SIZE,
         max_length=config.CROSS_ENCODER_MAX_LENGTH,
+        use_quantization=config.CROSS_ENCODER_QUANTIZATION,
     )
 
     async def _init():
@@ -352,8 +361,12 @@ def seeded_qdrant(qdrant_index, embedding_encoder):
     yield canonical_events
 
     # ── Teardown: delete test collection ──────────────────────────────
+    # Uses asyncio.run() which creates a fresh event loop.  Must
+    # re-initialize the Qdrant client so its HTTP connections bind to
+    # this new loop (the previous loop from _seed() is already closed).
     async def _teardown():
         try:
+            await qdrant_index.initialize()
             if hasattr(qdrant_index, '_client') and qdrant_index._client:
                 await qdrant_index._client.delete_collection(
                     collection_name=_TEST_COLLECTION
@@ -377,8 +390,14 @@ def _make_fake_connector(
     """
     Create a one-shot fake connector that yields the given events.
 
-    On the first call to ``stream_events()``, yields all events.
-    On subsequent calls, yields nothing (simulates empty reconnection).
+    On the first call to ``stream_events()``, yields all events and
+    then blocks indefinitely (simulating a real WebSocket connection
+    waiting for new data).  This prevents the orchestrator's
+    reconnection loop from spinning in a tight CPU-starving loop.
+
+    The orchestrator's ``shutdown()`` cancels the ingestion task,
+    which raises ``CancelledError`` inside the ``asyncio.sleep()``,
+    cleanly breaking the generator.
     """
     connector = AsyncMock()
     connector.venue_name = venue
@@ -395,13 +414,19 @@ def _make_fake_connector(
             _exhausted = True
             for ev in events:
                 yield ev
+        # Keep the "connection" alive — a real connector blocks here
+        # waiting for new events from the WebSocket.  Without this,
+        # the orchestrator's reconnection loop spins endlessly,
+        # starving the worker and stopper tasks on the event loop.
+        while True:
+            await asyncio.sleep(1.0)
 
     connector.stream_events = _stream
     return connector
 
 
 @pytest.fixture
-def integration_orchestrator(
+async def integration_orchestrator(
     qdrant_index,
     embedding_encoder,
     cross_encoder_model,
@@ -411,7 +436,17 @@ def integration_orchestrator(
     Orchestrator wired with real ML components and mocked I/O.
 
     Skips ``initialize()`` — all components are pre-injected.
+
+    Note: This fixture is async so it runs in the test's event loop,
+    avoiding ``asyncio.get_event_loop()`` deprecation in Python 3.10+.
+    We also re-initialize the Qdrant client to rebind its HTTP
+    connections to the current event loop (the module-scoped
+    ``seeded_qdrant`` fixture used ``asyncio.run()`` which created
+    and closed its own loop).
     """
+    # Rebind Qdrant client to the current event loop
+    await qdrant_index.initialize()
+
     # Create Kalshi events to stream
     kalshi_events = [
         _make_market_event(m) for m in STREAM_MARKETS_KALSHI
@@ -483,13 +518,10 @@ def integration_orchestrator(
     orch._pair_verifier = pair_verifier
     orch._writer = mock_writer
 
-    # Initialize caches synchronously
-    async def _init_caches():
-        await cache.initialize()
-        await spec_extractor.initialize()
-        await pair_verifier.initialize()
-
-    asyncio.get_event_loop().run_until_complete(_init_caches())
+    # Initialize caches in the current event loop
+    await cache.initialize()
+    await spec_extractor.initialize()
+    await pair_verifier.initialize()
 
     return orch, mock_writer, seeded_qdrant
 
@@ -523,20 +555,21 @@ async def test_full_pipeline_end_to_end(integration_orchestrator):
     # ── Run orchestrator with auto-shutdown stopper ────────────────────
     async def _stopper():
         """Monitor metrics and shut down once all events are processed."""
-        deadline = time.monotonic() + 120.0  # 2-minute hard timeout
+        # With INT8 Qwen + CUDA DeBERTa: ~30s embed + ~10s rerank per
+        # event.  Two events ≈ 2 min.  Without quantization or on CPU
+        # reranking alone can take ~6 min/event.  900s covers worst case
+        # (FP16 + CPU DeBERTa) with ample headroom.
+        deadline = time.monotonic() + 900.0
         while time.monotonic() < deadline:
             m = orch._metrics
             if m.events_processed + m.events_failed >= num_kalshi_events:
-                # All events handled — allow brief drain time
                 await asyncio.sleep(0.5)
                 await orch.shutdown()
                 return
             await asyncio.sleep(0.25)
 
-        # Hard timeout — force shutdown
         await orch.shutdown()
 
-    # Start orchestrator + stopper concurrently
     await asyncio.gather(
         orch.run(),
         _stopper(),
@@ -665,7 +698,7 @@ async def test_pipeline_performance_thresholds(integration_orchestrator):
 
     # Run with stopper (reuses same pattern as test above)
     async def _stopper():
-        deadline = time.monotonic() + 120.0
+        deadline = time.monotonic() + 900.0
         while time.monotonic() < deadline:
             m = orch._metrics
             if m.events_processed + m.events_failed >= num_kalshi_events:
@@ -679,14 +712,18 @@ async def test_pipeline_performance_thresholds(integration_orchestrator):
 
     m = orch._metrics
 
-    # Device-aware thresholds
+    # Device-aware thresholds.
+    # Qwen3-Embedding-4B is a 4-billion-parameter model.  On consumer
+    # GPUs (RTX 3070/4070 class) a single encode call can take 30-50 s
+    # — especially on the first call which includes CUDA kernel JIT.
+    # The threshold must be generous enough for cold-start + Qdrant
+    # upsert latency that is included in the "embedding" stage timer.
     if torch.cuda.is_available():
-        # CUDA: embedding model on GPU — fast
-        max_embedding_avg_ms = 5_000.0      # 5s per event
+        max_embedding_avg_ms = 60_000.0     # 60s per event (4B model + upsert)
         max_reranking_avg_ms = 15_000.0     # 15s (cross-encoder on CPU)
     else:
-        # CPU-only: both models on CPU — slower
-        max_embedding_avg_ms = 30_000.0     # 30s per event
+        # CPU-only: both models on CPU — much slower
+        max_embedding_avg_ms = 120_000.0    # 120s per event
         max_reranking_avg_ms = 60_000.0     # 60s (NLI on CPU)
 
     # Canonicalization: always fast (CPU string ops)
@@ -745,7 +782,7 @@ async def test_writer_enqueue_payload_structure(integration_orchestrator):
     num_kalshi_events = len(STREAM_MARKETS_KALSHI)
 
     async def _stopper():
-        deadline = time.monotonic() + 120.0
+        deadline = time.monotonic() + 900.0
         while time.monotonic() < deadline:
             m = orch._metrics
             if m.events_processed + m.events_failed >= num_kalshi_events:
@@ -864,6 +901,9 @@ async def test_graceful_shutdown_during_processing(
     orch._pair_verifier = pair_verifier
     orch._writer = mock_writer
 
+    # Rebind Qdrant client to the current event loop
+    await qdrant_index.initialize()
+
     await cache.initialize()
     await spec_extractor.initialize()
     await pair_verifier.initialize()
@@ -873,14 +913,18 @@ async def test_graceful_shutdown_during_processing(
         await asyncio.sleep(2.0)
         await orch.shutdown()
 
-    # Should complete without errors or hanging
+    # Should complete without errors or hanging.
+    # Outer timeout must exceed: _early_stopper delay (2s) +
+    # shutdown()'s internal worker drain timeout (600s).  The drain
+    # waits for any in-flight GPU/CPU inference to finish naturally.
+    # 660s = 2s stopper + 600s drain + 58s headroom.
     try:
         await asyncio.wait_for(
             asyncio.gather(orch.run(), _early_stopper()),
-            timeout=30.0,
+            timeout=660.0,
         )
     except asyncio.TimeoutError:
-        pytest.fail("Graceful shutdown timed out (>30s)")
+        pytest.fail("Graceful shutdown timed out (>660s)")
 
     # Verify consistency
     m = orch._metrics

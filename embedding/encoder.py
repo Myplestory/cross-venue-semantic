@@ -37,6 +37,7 @@ class EmbeddingEncoder:
         embedding_dim: int = 2048,
         instruction: Optional[str] = "Represent the market contract for similarity search.",
         use_quantization: bool = False,
+        gpu_concurrency: int = 1,
     ):
         """
         Initialize encoder.
@@ -49,6 +50,8 @@ class EmbeddingEncoder:
             embedding_dim: Output dimension (2048 default, 32-2560 via MRL)
             instruction: Task-specific instruction for better embeddings
             use_quantization: Use 8-bit quantization (reduces VRAM by ~50%)
+            gpu_concurrency: Max concurrent GPU forward passes (1 = serialize,
+                prevents OOM when multiple pipeline workers share the model)
         """
         self.model_name = model_name
         self.batch_size = batch_size
@@ -56,29 +59,32 @@ class EmbeddingEncoder:
         self.embedding_dim = embedding_dim
         self.instruction = instruction
         
-        # Device selection (supports CUDA, MPS for M4 Mac, or CPU)
         if device is None:
             if torch.cuda.is_available():
                 self.device = "cuda"
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                self.device = "mps"  # Metal Performance Shaders for M4 Mac
+                self.device = "mps"
             else:
                 self.device = "cpu"
         else:
             self.device = device
         
-        # Model instance (singleton pattern)
         self._model: Optional[SentenceTransformer] = None
         self._model_lock = asyncio.Lock()
         self._initialized = False
+
+        # Limits concurrent GPU forward passes across all pipeline workers.
+        # Semaphore(1) = fully serialized (zero extra VRAM from activations).
+        # Higher values trade VRAM headroom for throughput overlap.
+        self._gpu_semaphore = asyncio.Semaphore(max(1, gpu_concurrency))
         
-        # Quantization config
         self.use_quantization = use_quantization and self.device == "cuda"
         
         logger.info(
             f"EmbeddingEncoder initialized: model={model_name}, "
             f"device={self.device}, batch_size={batch_size}, "
-            f"embedding_dim={embedding_dim}, quantization={self.use_quantization}"
+            f"embedding_dim={embedding_dim}, quantization={self.use_quantization}, "
+            f"gpu_concurrency={gpu_concurrency}"
         )
     
     async def initialize(self) -> None:
@@ -124,15 +130,26 @@ class EmbeddingEncoder:
                     bnb_8bit_compute_dtype=torch.bfloat16
                 )
                 
-                # Note: sentence-transformers may need custom loading for quantization
-                # This is a placeholder - actual implementation depends on model support
                 model = SentenceTransformer(
                     self.model_name,
                     device=self.device,
                     model_kwargs={"quantization_config": quantization_config}
                 )
-            except ImportError:
-                logger.warning("bitsandbytes not available, loading without quantization")
+                logger.info("Model loaded with INT8 quantization via bitsandbytes")
+            except ImportError as exc:
+                logger.warning(
+                    "INT8 quantization failed (falling back to FP16): %s", exc
+                )
+                model = SentenceTransformer(
+                    self.model_name,
+                    device=self.device
+                )
+            except Exception as exc:
+                logger.warning(
+                    "INT8 quantization failed with unexpected error "
+                    "(falling back to FP16): %s", exc,
+                    exc_info=True,
+                )
                 model = SentenceTransformer(
                     self.model_name,
                     device=self.device
@@ -161,26 +178,24 @@ class EmbeddingEncoder:
         if not self._initialized:
             await self.initialize()
         
-        # Format with instruction if provided
         if self.instruction:
             formatted_text = f"{self.instruction}\n{text}"
         else:
             formatted_text = text
         
-        # Run encoding in executor (CPU-bound GPU operations)
         loop = asyncio.get_event_loop()
-        embedding = await loop.run_in_executor(
-            None,
-            lambda: self._model.encode(
-                formatted_text,
-                batch_size=1,
-                show_progress_bar=False,
-                convert_to_numpy=True,
-                normalize_embeddings=True,  # L2 normalization for cosine similarity
+        async with self._gpu_semaphore:
+            embedding = await loop.run_in_executor(
+                None,
+                lambda: self._model.encode(
+                    formatted_text,
+                    batch_size=1,
+                    show_progress_bar=False,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                )
             )
-        )
         
-        # Convert to list and ensure correct dimension
         embedding_list = embedding.tolist()
         
         # Handle 2D array (batch of 1) - take first element
@@ -209,24 +224,23 @@ class EmbeddingEncoder:
         if not texts:
             return []
         
-        # Format with instruction if provided
         if self.instruction:
             formatted_texts = [f"{self.instruction}\n{text}" for text in texts]
         else:
             formatted_texts = texts
         
-        # Run batch encoding in executor
         loop = asyncio.get_event_loop()
-        embeddings = await loop.run_in_executor(
-            None,
-            lambda: self._model.encode(
-                formatted_texts,
-                batch_size=self.batch_size,
-                show_progress_bar=False,
-                convert_to_numpy=True,
-                normalize_embeddings=True,
+        async with self._gpu_semaphore:
+            embeddings = await loop.run_in_executor(
+                None,
+                lambda: self._model.encode(
+                    formatted_texts,
+                    batch_size=self.batch_size,
+                    show_progress_bar=False,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                )
             )
-        )
         
         # Convert to list of lists
         embeddings_list = embeddings.tolist()

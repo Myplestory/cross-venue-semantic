@@ -159,6 +159,13 @@ WRITER_QUEUE_SIZE = get_env_int("WRITER_QUEUE_SIZE", 500)
 WRITER_MAX_RETRIES = get_env_int("WRITER_MAX_RETRIES", 3)
 WRITER_NOTIFY_CHANNEL = get_env("WRITER_NOTIFY_CHANNEL", "pair_changes")
 
+# GPU Concurrency Control
+# Semaphore permits per model — controls how many workers can run
+# GPU forward passes concurrently on the same model.
+# 1 = serialize (safest, zero extra VRAM).  2 = allow overlap (~+1 GB peak).
+EMBEDDING_GPU_CONCURRENCY = get_env_int("EMBEDDING_GPU_CONCURRENCY", 1)
+CROSS_ENCODER_GPU_CONCURRENCY = get_env_int("CROSS_ENCODER_GPU_CONCURRENCY", 1)
+
 # Orchestrator Configuration
 ORCHESTRATOR_VENUES = get_env("ORCHESTRATOR_VENUES", "kalshi,polymarket")
 ORCHESTRATOR_INGESTION_QUEUE_SIZE = get_env_int("ORCHESTRATOR_INGESTION_QUEUE_SIZE", 1000)
@@ -198,6 +205,8 @@ def print_config_summary() -> None:
     print(f"  ORCHESTRATOR_VENUES: {ORCHESTRATOR_VENUES}")
     print(f"  ORCHESTRATOR_INGESTION_QUEUE_SIZE: {ORCHESTRATOR_INGESTION_QUEUE_SIZE}")
     print(f"  ORCHESTRATOR_NUM_WORKERS: {ORCHESTRATOR_NUM_WORKERS}")
+    print(f"  EMBEDDING_GPU_CONCURRENCY: {EMBEDDING_GPU_CONCURRENCY}")
+    print(f"  CROSS_ENCODER_GPU_CONCURRENCY: {CROSS_ENCODER_GPU_CONCURRENCY}")
     print(f"  ORCHESTRATOR_MODEL_ID: {ORCHESTRATOR_MODEL_ID}")
     print(f"  ORCHESTRATOR_PROMPT_VERSION: {ORCHESTRATOR_PROMPT_VERSION}")
     print()

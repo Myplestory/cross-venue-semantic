@@ -6,8 +6,12 @@ Industry standards:
 - Batch upserts for efficiency
 - Payload filtering for venue/date queries
 - Async operations
+- Event-loop-safe: automatically recreates the HTTP client when
+  the running asyncio event loop changes (e.g. across pytest
+  fixtures that use ``asyncio.run()``).
 """
 
+import asyncio
 import logging
 import uuid
 from typing import List, Dict, Optional, Any
@@ -39,6 +43,13 @@ class QdrantIndex:
     
     Handles collection creation, batch upserts, and similarity search.
     Optimized for 4B model embeddings (2048-3072 dimensions).
+    
+    The internal ``AsyncQdrantClient`` (and its httpx connection pool)
+    is bound to the asyncio event loop that was running when
+    ``initialize()`` was first called.  If a subsequent call to
+    ``initialize()`` detects a *different* running loop, the old
+    client is closed and a fresh one is created so that HTTP
+    connections are registered with the correct loop.
     """
     
     def __init__(
@@ -63,24 +74,74 @@ class QdrantIndex:
         self.collection_name = collection_name
         self.vector_size = vector_size
         self.distance = distance
+        self._api_key = api_key
         
-        # Initialize async client
-        if api_key:
-            self._client = AsyncQdrantClient(
-                url=url,
-                api_key=api_key,
-            )
-        else:
-            self._client = AsyncQdrantClient(url=url)
+        # Create initial async client
+        self._client = self._create_client()
         
         self._initialized = False
+        # Track which event loop the client's connections are bound to.
+        # ``None`` means no I/O has been performed yet.
+        self._bound_loop: Optional[asyncio.AbstractEventLoop] = None
+        
         logger.info(
-            f"QdrantIndex initialized: url={url}, "
-            f"collection={collection_name}, vector_size={vector_size}"
+            "QdrantIndex created: url=%s, collection=%s, vector_size=%d",
+            url, collection_name, vector_size,
         )
     
+    # ── Client lifecycle helpers ──────────────────────────────────────
+
+    def _create_client(self) -> AsyncQdrantClient:
+        """Create a fresh ``AsyncQdrantClient`` instance."""
+        if self._api_key:
+            return AsyncQdrantClient(url=self.url, api_key=self._api_key)
+        return AsyncQdrantClient(url=self.url)
+
+    async def _rebind_if_loop_changed(self) -> None:
+        """
+        Detect an event-loop change and recreate the HTTP client.
+
+        ``AsyncQdrantClient`` internally holds an ``httpx.AsyncClient``
+        whose TCP connections are registered with the event loop that
+        was running when they were opened.  If the loop has since been
+        closed (e.g. ``asyncio.run()`` finished), those connections are
+        orphaned and any operation on them raises
+        ``RuntimeError: Event loop is closed``.
+
+        This method compares the *current* running loop against the
+        loop that was active during the last ``initialize()`` call.
+        On mismatch it:
+          1. Best-effort closes the old client.
+          2. Creates a new client bound to nothing yet (lazy connect).
+          3. Resets ``_initialized`` so the next ``initialize()`` call
+             re-checks the collection and indexes (idempotent).
+        """
+        current_loop = asyncio.get_running_loop()
+        if self._bound_loop is not None and self._bound_loop is not current_loop:
+            logger.info(
+                "Event loop changed for QdrantIndex — recreating client "
+                "(collection=%s)", self.collection_name,
+            )
+            # Best-effort close; the old loop may already be closed.
+            try:
+                await self._client.close()
+            except Exception:
+                pass
+            self._client = self._create_client()
+            self._initialized = False
+        self._bound_loop = current_loop
+
+    # ── Public API ────────────────────────────────────────────────────
+
     async def initialize(self) -> None:
-        """Create collection if it doesn't exist."""
+        """
+        Create collection if it doesn't exist.
+
+        Safe to call repeatedly — short-circuits when already
+        initialised *and* the event loop has not changed.
+        """
+        await self._rebind_if_loop_changed()
+
         if self._initialized:
             return
         

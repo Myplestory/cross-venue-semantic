@@ -48,6 +48,7 @@ class CrossEncoder:
         use_compilation: bool = True,
         entailment_threshold: float = 0.7,
         neutral_threshold: float = 0.3,
+        gpu_concurrency: int = 1,
     ):
         """
         Initialize cross-encoder.
@@ -60,8 +61,9 @@ class CrossEncoder:
             use_quantization: Use 8-bit quantization (reduces VRAM by ~50%)
             entailment_threshold: Threshold for high confidence (entailment > this)
             neutral_threshold: Threshold for medium confidence (neutral > this)
+            gpu_concurrency: Max concurrent GPU forward passes (1 = serialize,
+                prevents OOM when multiple pipeline workers share the model)
         """
-        # Use config default if model_name not provided
         self.model_name = model_name if model_name is not None else config.CROSS_ENCODER_MODEL
         self.batch_size = batch_size
         self.max_length = max_length
@@ -70,33 +72,35 @@ class CrossEncoder:
         self.entailment_threshold = entailment_threshold
         self.neutral_threshold = neutral_threshold
         
-        # Device selection (supports CUDA, MPS for M4 Mac, or CPU)
         if device is None:
             if torch.cuda.is_available():
                 self.device = "cuda"
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                self.device = "mps"  # Metal Performance Shaders for M4 Mac
+                self.device = "mps"
             else:
                 self.device = "cpu"
         else:
             self.device = device
         
-        # Model instance (singleton pattern)
         self._model: Optional[AutoModelForSequenceClassification] = None
         self._tokenizer: Optional[AutoTokenizer] = None
         self._pipeline: Optional[pipeline] = None
         self._id2label: Optional[Dict[int, str]] = None
         self._model_lock = asyncio.Lock()
         self._initialized = False
+
+        # Limits concurrent GPU forward passes across all pipeline workers.
+        # Semaphore(1) = fully serialized (zero extra VRAM from activations).
+        self._gpu_semaphore = asyncio.Semaphore(max(1, gpu_concurrency))
         
-        # Quantization config
         self.use_quantization = use_quantization and self.device == "cuda"
         
         logger.info(
             f"CrossEncoder initialized: model={model_name}, "
             f"device={self.device}, batch_size={batch_size}, "
             f"quantization={self.use_quantization}, "
-            f"compilation={self.use_compilation}"
+            f"compilation={self.use_compilation}, "
+            f"gpu_concurrency={gpu_concurrency}"
         )
     
     async def initialize(self) -> None:
@@ -157,22 +161,92 @@ class CrossEncoder:
                 raise
     
     def _load_model_sync(self):
-        """Synchronous model loading (called from executor)."""
+        """
+        Synchronous model loading (called from executor).
+
+        Loads DeBERTa with optional INT8 quantization via ``bitsandbytes``.
+        Quantization reduces VRAM from ~1.7 GB (FP32) to ~0.5 GB, allowing
+        DeBERTa to coexist with a quantized Qwen on 8 GB GPUs.
+
+        Fallback behaviour:
+        - ``ImportError`` (missing ``bitsandbytes``/``accelerate``) → FP32 + warning
+        - Any other ``Exception`` → FP32 + error log with traceback
+
+        Note: ``bitsandbytes`` requires ``device_map="auto"`` instead of
+        ``.to(device)``.  Calling ``.to()`` on a quantized model raises.
+        """
         if not HAS_TRANSFORMERS:
             raise ImportError("transformers library is required for cross-encoder")
-        
-        # Load tokenizer and model
+
+        # ── Tokenizer ────────────────────────────────────────────────────
         tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        model = AutoModelForSequenceClassification.from_pretrained(
-            self.model_name
-        )
-        model.to(self.device)
+
+        # ── Model (with optional INT8 quantization) ──────────────────────
+        quantized = False
+
+        if self.use_quantization:
+            try:
+                from transformers import BitsAndBytesConfig
+
+                quantization_config = BitsAndBytesConfig(
+                    load_in_8bit=True,
+                    bnb_8bit_compute_dtype=torch.bfloat16,
+                )
+                # device_map="auto" is required by bitsandbytes — it places
+                # quantized layers on CUDA automatically.
+                model = AutoModelForSequenceClassification.from_pretrained(
+                    self.model_name,
+                    quantization_config=quantization_config,
+                    device_map="auto",
+                )
+                quantized = True
+                logger.info(
+                    "Cross-encoder loaded with INT8 quantization "
+                    "via bitsandbytes"
+                )
+            except ImportError as exc:
+                logger.warning(
+                    "INT8 quantization unavailable for cross-encoder "
+                    "(falling back to FP32): %s",
+                    exc,
+                )
+                model = AutoModelForSequenceClassification.from_pretrained(
+                    self.model_name
+                )
+                model.to(self.device)
+            except Exception as exc:
+                logger.error(
+                    "INT8 quantization failed for cross-encoder "
+                    "(falling back to FP32): %s",
+                    exc,
+                    exc_info=True,
+                )
+                model = AutoModelForSequenceClassification.from_pretrained(
+                    self.model_name
+                )
+                model.to(self.device)
+        else:
+            model = AutoModelForSequenceClassification.from_pretrained(
+                self.model_name
+            )
+            model.to(self.device)
+
         model.eval()
-        
+
         # Capture label mapping before potential torch.compile() wrapping
         # DeBERTa-v3-large-mnli labels: {0: "entailment", 1: "neutral", 2: "contradiction"}
         self._id2label = model.config.id2label
-        
+
+        # Quantized INT8 layers use custom bitsandbytes autograd functions
+        # that torch.compile() cannot trace.  Disable compilation when
+        # running with quantization to avoid RuntimeError during codegen.
+        if quantized and self.use_compilation:
+            logger.info(
+                "torch.compile() disabled for quantized cross-encoder "
+                "(INT8 layers are not traceable)"
+            )
+            self.use_compilation = False
+
         # OPTIMIZATION: Compile model for faster inference
         # torch.compile() is available in PyTorch 2.0+
         # Compiles model to optimized code (one-time overhead, then faster)
@@ -238,7 +312,11 @@ class CrossEncoder:
                     "Skipping model compilation."
                 )
         else:
-            compilation_reason = "use_compilation=False"
+            compilation_reason = (
+                "INT8 quantization active (layers not traceable)"
+                if quantized
+                else "use_compilation=False"
+            )
         
         # Log final compilation status
         if compilation_status != "SUCCESS":
@@ -255,25 +333,33 @@ class CrossEncoder:
         # in the batch scoring path.
         pipeline_model = getattr(model, "_orig_mod", model)
 
-        # Note: transformers pipeline device parameter:
-        # - CUDA: device=0 (device index)
-        # - MPS: Don't pass device (model already on MPS via model.to())
-        # - CPU: device=-1 or don't pass it
-        # Note: task must be the first positional argument, not a keyword argument
-        if self.device == "cuda":
-            pipeline_device = 0
+        # Transformers pipeline device parameter:
+        # - Quantized: omit device — model already placed via device_map="auto";
+        #   passing device= triggers .to() which raises for INT8 models.
+        # - CUDA (FP32): device=0 (device index)
+        # - MPS: omit device (model already on MPS via model.to())
+        # - CPU: device=-1
+        # Note: task must be the first positional argument, not a keyword argument.
+        if quantized:
+            # Quantized models are already on CUDA via device_map="auto".
             nli_pipeline = pipeline(
-                "text-classification",  # Positional argument
+                "text-classification",
                 model=pipeline_model,
                 tokenizer=tokenizer,
-                device=pipeline_device,
+                return_all_scores=True,
+            )
+        elif self.device == "cuda":
+            nli_pipeline = pipeline(
+                "text-classification",
+                model=pipeline_model,
+                tokenizer=tokenizer,
+                device=0,
                 return_all_scores=True,
             )
         elif self.device == "mps":
-            # MPS: Don't pass device parameter - model is already on MPS
-            # The pipeline will use the device the model is already on
+            # MPS: model already moved via .to() — pipeline detects device.
             nli_pipeline = pipeline(
-                "text-classification",  # Positional argument
+                "text-classification",
                 model=pipeline_model,
                 tokenizer=tokenizer,
                 return_all_scores=True,
@@ -281,7 +367,7 @@ class CrossEncoder:
         else:
             # CPU
             nli_pipeline = pipeline(
-                "text-classification",  # Positional argument
+                "text-classification",
                 model=pipeline_model,
                 tokenizer=tokenizer,
                 device=-1,
@@ -345,10 +431,11 @@ class CrossEncoder:
             await self.initialize()
 
         loop = asyncio.get_running_loop()
-        scores = await loop.run_in_executor(
-            None,
-            lambda: self._score_pair_sync(query_text, candidate_text)
-        )
+        async with self._gpu_semaphore:
+            scores = await loop.run_in_executor(
+                None,
+                lambda: self._score_pair_sync(query_text, candidate_text)
+            )
 
         return scores
 
@@ -451,15 +538,16 @@ class CrossEncoder:
         default_scores = {"entailment": 0.0, "neutral": 0.0, "contradiction": 0.0}
 
         loop = asyncio.get_running_loop()
-        try:
-            results = await loop.run_in_executor(
-                None,
-                lambda: self._score_batch_sync(pairs)
-            )
-            return results
-        except Exception as e:
-            logger.error(f"Batch scoring failed, returning defaults: {e}", exc_info=True)
-            return [dict(default_scores) for _ in pairs]
+        async with self._gpu_semaphore:
+            try:
+                results = await loop.run_in_executor(
+                    None,
+                    lambda: self._score_batch_sync(pairs)
+                )
+                return results
+            except Exception as e:
+                logger.error(f"Batch scoring failed, returning defaults: {e}", exc_info=True)
+                return [dict(default_scores) for _ in pairs]
     
     def map_nli_to_confidence(
         self,

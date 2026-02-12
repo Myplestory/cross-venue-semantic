@@ -15,8 +15,12 @@ Architecture:
 - Graceful shutdown: signal-aware, drains queues before stopping
 
 GPU Memory (8 GB RTX 3070):
-- Recommended: EMBEDDING_DEVICE=cuda, CROSS_ENCODER_DEVICE=cpu
-- 16 GB+ GPU: Both auto-detect to cuda
+- Recommended: Both quantized on CUDA:
+    EMBEDDING_QUANTIZATION=true   (~4.5 GB)
+    CROSS_ENCODER_QUANTIZATION=true (~0.5 GB)
+    Total ≈ 6.5 GB — leaves ~1.5 GB for activations
+- Alternative: CROSS_ENCODER_DEVICE=cpu (no quantization needed, ~30-70s/event reranking)
+- 16 GB+ GPU: Both auto-detect to CUDA, quantization optional
 - Orchestrator logs VRAM usage at startup for verification
 
 Fintech standards applied:
@@ -359,6 +363,7 @@ class SemanticPipelineOrchestrator:
             embedding_dim=config.EMBEDDING_DIM,
             instruction=config.EMBEDDING_INSTRUCTION,
             use_quantization=config.EMBEDDING_QUANTIZATION,
+            gpu_concurrency=config.EMBEDDING_GPU_CONCURRENCY,
         )
         await self._embedding_encoder.initialize()
         logger.info(
@@ -400,6 +405,8 @@ class SemanticPipelineOrchestrator:
             device=config.CROSS_ENCODER_DEVICE,
             batch_size=config.CROSS_ENCODER_BATCH_SIZE,
             max_length=config.CROSS_ENCODER_MAX_LENGTH,
+            use_quantization=config.CROSS_ENCODER_QUANTIZATION,
+            gpu_concurrency=config.CROSS_ENCODER_GPU_CONCURRENCY,
         )
         await self._cross_encoder.initialize()
         logger.info(
@@ -564,13 +571,17 @@ class SemanticPipelineOrchestrator:
                 pass  # Workers will also check _running flag
 
         # ── 4. Wait for workers to drain ────────────────────────────
+        # The drain timeout must exceed the longest possible in-flight
+        # GPU/CPU operation.  With Qwen3-4B INT8 cold-start (~60s) or
+        # FP16 (~300s), and DeBERTa on CPU (~360s worst case), 600s
+        # covers the extreme scenarios without force-cancelling.
         if self._worker_tasks:
             try:
                 await asyncio.wait_for(
                     asyncio.gather(
                         *self._worker_tasks, return_exceptions=True
                     ),
-                    timeout=30.0,
+                    timeout=600.0,
                 )
             except asyncio.TimeoutError:
                 logger.warning("Worker drain timed out — force-cancelling")
