@@ -247,7 +247,14 @@ class CrossEncoder:
                 f"device={self.device}, reason={compilation_reason}"
             )
         
-        # Create pipeline for easier inference
+        # Create pipeline for easier inference (single-pair scoring path).
+        # torch.compile() wraps the model in OptimizedModule, which HF
+        # pipeline() does not recognize as a valid model class.  Unwrap to
+        # the original nn.Module so the pipeline can introspect it.  The
+        # compiled model is kept as self._model for direct forward() calls
+        # in the batch scoring path.
+        pipeline_model = getattr(model, "_orig_mod", model)
+
         # Note: transformers pipeline device parameter:
         # - CUDA: device=0 (device index)
         # - MPS: Don't pass device (model already on MPS via model.to())
@@ -257,7 +264,7 @@ class CrossEncoder:
             pipeline_device = 0
             nli_pipeline = pipeline(
                 "text-classification",  # Positional argument
-                model=model,
+                model=pipeline_model,
                 tokenizer=tokenizer,
                 device=pipeline_device,
                 return_all_scores=True,
@@ -267,7 +274,7 @@ class CrossEncoder:
             # The pipeline will use the device the model is already on
             nli_pipeline = pipeline(
                 "text-classification",  # Positional argument
-                model=model,
+                model=pipeline_model,
                 tokenizer=tokenizer,
                 return_all_scores=True,
             )
@@ -275,7 +282,7 @@ class CrossEncoder:
             # CPU
             nli_pipeline = pipeline(
                 "text-classification",  # Positional argument
-                model=model,
+                model=pipeline_model,
                 tokenizer=tokenizer,
                 device=-1,
                 return_all_scores=True,

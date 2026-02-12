@@ -35,6 +35,19 @@ dev = [
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "discovery", "discovery.*",
+    "canonicalization", "canonicalization.*",
+    "embedding", "embedding.*",
+    "matching", "matching.*",
+    "extraction", "extraction.*",
+    "persistence", "persistence.*",
+    "orchestrator_tests", "orchestrator_tests.*",
+]
+exclude = ["venv", "venv.*"]
+
 [tool.black]
 line-length = 100
 target-version = ['py310']
