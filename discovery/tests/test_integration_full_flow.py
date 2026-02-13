@@ -33,6 +33,7 @@ class TestFullDiscoveryFlow:
         with patch("websockets.connect", new_callable=AsyncMock) as mock_connect:
             mock_ws = AsyncMock()
             mock_ws.closed = False
+            mock_ws.close_code = None
             mock_ws.send = AsyncMock()
             
             messages = [
@@ -89,6 +90,7 @@ class TestFullDiscoveryFlow:
         with patch("websockets.connect", new_callable=AsyncMock) as mock_connect:
             mock_ws = AsyncMock()
             mock_ws.closed = False
+            mock_ws.close_code = None
             mock_ws.send = AsyncMock()
             
             # Send same market twice
@@ -136,6 +138,7 @@ class TestFullDiscoveryFlow:
         with patch("websockets.connect", new_callable=AsyncMock) as mock_connect:
             mock_ws = AsyncMock()
             mock_ws.closed = False
+            mock_ws.close_code = None
             mock_ws.send = AsyncMock()
             
             async def kalshi_iter():
@@ -160,11 +163,13 @@ class TestFullDiscoveryFlow:
             
             mock_ws_kalshi = AsyncMock()
             mock_ws_kalshi.closed = False
+            mock_ws_kalshi.close_code = None
             mock_ws_kalshi.send = AsyncMock()
             mock_ws_kalshi.__aiter__ = lambda self: kalshi_iter()
             
             mock_ws_poly = AsyncMock()
             mock_ws_poly.closed = False
+            mock_ws_poly.close_code = None
             mock_ws_poly.send = AsyncMock()
             mock_ws_poly.__aiter__ = lambda self: polymarket_iter()
             
@@ -217,6 +222,7 @@ class TestFullDiscoveryFlow:
         with patch("websockets.connect", new_callable=AsyncMock) as mock_connect:
             mock_ws = AsyncMock()
             mock_ws.closed = False
+            mock_ws.close_code = None
             mock_ws.send = AsyncMock()
             
             async def mock_iter():
@@ -259,6 +265,7 @@ class TestFullDiscoveryFlow:
         with patch("websockets.connect", new_callable=AsyncMock) as mock_connect:
             mock_ws = AsyncMock()
             mock_ws.closed = False
+            mock_ws.close_code = None
             mock_ws.send = AsyncMock()
             
             messages = [

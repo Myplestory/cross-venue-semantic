@@ -29,7 +29,7 @@ async def test_kalshi_connector(use_mock: bool = False):
         ws_url = "ws://localhost:8765"
         logger.info("Using mock server at ws://localhost:8765")
     else:
-        ws_url = "wss://api.kalshi.com/trade-api/v2/websocket"
+        ws_url = "wss://api.elections.kalshi.com/trade-api/ws/v2"
         logger.info("Connecting to real Kalshi WebSocket")
     
     connector = KalshiConnector(ws_url=ws_url, reconnect_delay=5.0)

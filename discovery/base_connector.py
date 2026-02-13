@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 from abc import ABC, abstractmethod
 
 import websockets
-from websockets.exceptions import ConnectionClosed, WebSocketException
+from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
 
 from .types import VenueType, MarketEvent
 
@@ -52,7 +52,14 @@ class BaseVenueConnector(ABC):
         self._reconnect_attempts = 0
         self._event_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)  # Buffer for non-blocking consumption
         self._receive_task: Optional[asyncio.Task] = None  # Background message reception task
-    
+
+    def get_connection_headers(self) -> Optional[dict]:
+        """
+        Optional extra headers for the WebSocket handshake (e.g. auth).
+        Override in subclasses. Return None or empty dict for none.
+        """
+        return None
+
     async def connect(self) -> None:
         """Establish WebSocket connection."""
         if self._ws is not None and self._ws.close_code is None:
@@ -64,17 +71,45 @@ class BaseVenueConnector(ABC):
                 raise ImportError("websockets library not installed")
             
             logger.info(f"[{self.venue_name}] Connecting to {self.ws_url}")
-            self._ws = await websockets.connect(
-                self.ws_url,
-                ping_interval=20,
-                ping_timeout=10,
-            )
+            extra_headers = self.get_connection_headers() or {}
+            connect_kwargs: dict = {"ping_interval": 20, "ping_timeout": 10}
+            if extra_headers:
+                connect_kwargs["additional_headers"] = extra_headers
+                logger.debug(
+                    "[%s] Handshake headers: %s",
+                    self.venue_name,
+                    ", ".join(extra_headers.keys()),
+                )
+            self._ws = await websockets.connect(self.ws_url, **connect_kwargs)
             self._reconnect_attempts = 0
             logger.info(f"[{self.venue_name}] Connected successfully")
             
             # Send initial subscription message
             await self._send_subscription()
             
+        except InvalidStatus as e:
+            logger.error(
+                "[%s] Connection failed: %s",
+                self.venue_name,
+                e,
+            )
+            if e.response.status_code == 401 and e.response.body:
+                try:
+                    body = e.response.body.decode("utf-8")
+                    logger.error("[%s] 401 response body: %s", self.venue_name, body)
+                    if "NOT_FOUND" in body and "KALSHI" in str(self.venue_name).upper():
+                        logger.error(
+                            "[%s] Kalshi returned NOT_FOUND: API key not recognized for WebSocket. "
+                            "Create a new key at https://kalshi.com/account/profile (API Keys) and ensure it has WebSocket access; or contact Kalshi support.",
+                            self.venue_name,
+                        )
+                except Exception:
+                    logger.error(
+                        "[%s] 401 response body (raw): %s",
+                        self.venue_name,
+                        e.response.body[:500],
+                    )
+            raise
         except Exception as e:
             logger.error(f"[{self.venue_name}] Connection failed: {e}")
             raise

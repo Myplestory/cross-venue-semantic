@@ -174,6 +174,17 @@ ORCHESTRATOR_MODEL_ID = get_env("ORCHESTRATOR_MODEL_ID", "rule-based-v1")
 ORCHESTRATOR_PROMPT_VERSION = get_env("ORCHESTRATOR_PROMPT_VERSION", "v1.0")
 ORCHESTRATOR_DEDUP_TTL = get_env_int("ORCHESTRATOR_DEDUP_TTL", 3600)
 
+# Kalshi WebSocket auth (required for wss://api.elections.kalshi.com/trade-api/ws/v2)
+# API keys: https://docs.kalshi.com/getting_started/api_keys
+# WebSocket: https://docs.kalshi.com/websockets/websocket-connection
+KALSHI_API_KEY_ID = get_env("KALSHI_API_KEY_ID")
+KALSHI_PRIVATE_KEY_PATH = get_env("KALSHI_PRIVATE_KEY_PATH")
+KALSHI_PRIVATE_KEY = get_env("KALSHI_PRIVATE_KEY")  # PEM string (alternative to path)
+# If your key was created at demo.kalshi.com, set KALSHI_USE_DEMO=true (uses wss://demo-api.kalshi.co/...)
+KALSHI_USE_DEMO = get_env_bool("KALSHI_USE_DEMO", False)
+# Optional: override WebSocket URL (default: wss://api.elections.kalshi.com/trade-api/ws/v2 or demo)
+KALSHI_WS_URL = get_env("KALSHI_WS_URL")
+
 
 def print_config_summary() -> None:
     """
@@ -209,4 +220,8 @@ def print_config_summary() -> None:
     print(f"  CROSS_ENCODER_GPU_CONCURRENCY: {CROSS_ENCODER_GPU_CONCURRENCY}")
     print(f"  ORCHESTRATOR_MODEL_ID: {ORCHESTRATOR_MODEL_ID}")
     print(f"  ORCHESTRATOR_PROMPT_VERSION: {ORCHESTRATOR_PROMPT_VERSION}")
+    print(f"  KALSHI_API_KEY_ID: {'***' + KALSHI_API_KEY_ID[-4:] if KALSHI_API_KEY_ID else 'Not set'}")
+    print(f"  KALSHI_PRIVATE_KEY_PATH: {KALSHI_PRIVATE_KEY_PATH or 'Not set'}")
+    print(f"  KALSHI_USE_DEMO: {KALSHI_USE_DEMO}")
+    print(f"  KALSHI_WS_URL: {KALSHI_WS_URL or '(default)'}")
     print()

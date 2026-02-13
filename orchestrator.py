@@ -304,6 +304,7 @@ class SemanticPipelineOrchestrator:
         self._worker_tasks: List[asyncio.Task] = []
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._metrics: PipelineMetrics = PipelineMetrics()
+        self._ingestion_log_count: int = 0
 
         logger.info(
             "Orchestrator created: venues=%s, workers=%d, queue_size=%d",
@@ -486,6 +487,78 @@ class SemanticPipelineOrchestrator:
         # ── Start persistence consumer ──────────────────────────────
         await self._writer.start()
 
+        # ── Start pipeline workers before bootstrap ─────────────────
+        # Workers must be running so bootstrap put() is consumed (backpressure);
+        # otherwise the queue fills and we block on every put.
+        for i in range(self._num_workers):
+            task = asyncio.create_task(
+                self._pipeline_worker(worker_id=i),
+                name=f"worker-{i}",
+            )
+            self._worker_tasks.append(task)
+
+        # ── Bootstrap: REST fetch of current markets (e.g. Kalshi) ───
+        # Non-blocking put: put_nowait; on full queue yield to workers and retry once.
+        # Hard timeout so a stuck REST call never blocks startup. Pass deadline so connector
+        # can return partial results before we cancel (avoids losing all bootstrap data).
+        _BOOTSTRAP_TIMEOUT = 90.0
+        _BOOTSTRAP_DEADLINE_SEC = 85.0  # return partial results this many seconds in
+        for connector in self._connectors:
+            if not hasattr(connector, "fetch_bootstrap_markets"):
+                continue
+            venue = connector.venue_name.value
+            try:
+                logger.info("[%s] Bootstrap: fetching current markets (timeout %.0fs)...", venue, _BOOTSTRAP_TIMEOUT)
+                loop = asyncio.get_event_loop()
+                deadline = loop.time() + _BOOTSTRAP_DEADLINE_SEC
+                bootstrap_events = await asyncio.wait_for(
+                    connector.fetch_bootstrap_markets(deadline=deadline),
+                    timeout=_BOOTSTRAP_TIMEOUT,
+                )
+                enqueued = 0
+                dropped = 0
+                for event in bootstrap_events:
+                    self._metrics.events_received += 1
+                    if self._deduplicator.is_duplicate(event):
+                        self._metrics.events_deduplicated += 1
+                        continue
+                    try:
+                        self._ingestion_queue.put_nowait(event)
+                        enqueued += 1
+                    except asyncio.QueueFull:
+                        await asyncio.sleep(0.05)  # yield to workers
+                        try:
+                            self._ingestion_queue.put_nowait(event)
+                            enqueued += 1
+                        except asyncio.QueueFull:
+                            dropped += 1
+                if dropped:
+                    logger.warning(
+                        "[%s] Bootstrap: queue full, dropped %d market(s)",
+                        venue,
+                        dropped,
+                    )
+                if bootstrap_events:
+                    logger.info(
+                        "[%s] Bootstrap: enqueued %d/%d market(s) for pipeline",
+                        venue,
+                        enqueued,
+                        len(bootstrap_events),
+                    )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[%s] Bootstrap timed out after %.0fs — skipping REST bootstrap, WebSocket will stream updates",
+                    venue,
+                    _BOOTSTRAP_TIMEOUT,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[%s] Bootstrap failed: %s",
+                    venue,
+                    exc,
+                    exc_info=True,
+                )
+
         # ── Start venue connector ingestion tasks ───────────────────
         for connector in self._connectors:
             task = asyncio.create_task(
@@ -493,14 +566,6 @@ class SemanticPipelineOrchestrator:
                 name=f"ingest-{connector.venue_name.value}",
             )
             self._connector_tasks.append(task)
-
-        # ── Start pipeline workers ──────────────────────────────────
-        for i in range(self._num_workers):
-            task = asyncio.create_task(
-                self._pipeline_worker(worker_id=i),
-                name=f"worker-{i}",
-            )
-            self._worker_tasks.append(task)
 
         # ── Start heartbeat ─────────────────────────────────────────
         self._heartbeat_task = asyncio.create_task(
@@ -511,6 +576,9 @@ class SemanticPipelineOrchestrator:
             "Pipeline running: %d connector(s), %d worker(s)",
             len(self._connector_tasks),
             len(self._worker_tasks),
+        )
+        logger.info(
+            "Ingestion: first 3 events per run logged; heartbeat every 60s shows rcvd= proc= pairs= queue="
         )
 
         # ── Block until shutdown completes ──────────────────────────
@@ -654,6 +722,16 @@ class SemanticPipelineOrchestrator:
                     if self._deduplicator.is_duplicate(event):
                         self._metrics.events_deduplicated += 1
                         continue
+
+                    # Log first few enqueued events so user sees ingestion is working
+                    if self._ingestion_log_count < 3:
+                        logger.info(
+                            "[%s] Ingesting event: %s — %s",
+                            venue,
+                            event.venue_market_id,
+                            ((event.title or "").strip() or "(no title)")[:55],
+                        )
+                        self._ingestion_log_count += 1
 
                     # Enqueue with bounded wait (backpressure)
                     try:

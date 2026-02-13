@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -33,16 +34,19 @@ def _setup_logging() -> None:
     Format: ``[TIMESTAMP] LEVEL  module  message``
 
     Levels:
-    - Root logger: INFO
+    - Root logger: from LOG_LEVEL env (default INFO)
     - ``sentence_transformers``, ``transformers``, ``torch``: WARNING
     - ``qdrant_client``: WARNING
     - ``asyncpg``: WARNING
+    - ``websockets``: DEBUG when LOG_LEVEL=DEBUG or WEBSOCKET_DEBUG=true (handshake request/response)
     """
     fmt = (
         "[%(asctime)s] %(levelname)-7s %(name)-30s %(message)s"
     )
+    level_name = (os.getenv("LOG_LEVEL") or "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
     logging.basicConfig(
-        level=logging.INFO,
+        level=level,
         format=fmt,
         datefmt="%Y-%m-%d %H:%M:%S",
         stream=sys.stdout,
@@ -60,6 +64,10 @@ def _setup_logging() -> None:
         "urllib3",
     ):
         logging.getLogger(lib).setLevel(logging.WARNING)
+
+    # WebSocket handshake debugging: see GET line and headers sent/received
+    if level <= logging.DEBUG or os.getenv("WEBSOCKET_DEBUG", "").lower() in ("1", "true", "yes"):
+        logging.getLogger("websockets").setLevel(logging.DEBUG)
 
 
 async def _run() -> None:

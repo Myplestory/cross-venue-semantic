@@ -15,6 +15,26 @@ from .polymarket_poller import PolymarketConnector
 logger = logging.getLogger(__name__)
 
 
+def _kalshi_kwargs():
+    """Kalshi auth from config (optional)."""
+    try:
+        import config
+        kwargs = {}
+        key_id = getattr(config, "KALSHI_API_KEY_ID", None)
+        if key_id and str(key_id).strip():
+            kwargs["api_key_id"] = str(key_id).strip()
+        path = getattr(config, "KALSHI_PRIVATE_KEY_PATH", None)
+        if path and str(path).strip():
+            # Normalize: forward slashes work on Windows; avoid backslash escape issues from .env
+            kwargs["private_key_path"] = str(path).strip().replace("\\", "/")
+        pem = getattr(config, "KALSHI_PRIVATE_KEY", None)
+        if pem and str(pem).strip():
+            kwargs["private_key_pem"] = str(pem).strip()
+        return kwargs
+    except ImportError:
+        return {}
+
+
 # Registry of venue connectors
 _VENUE_REGISTRY: Dict[VenueType, Type[BaseVenueConnector]] = {
     VenueType.KALSHI: KalshiConnector,
@@ -83,13 +103,30 @@ def create_connector(
     if ws_url is None:
         ws_url = _get_default_url(venue_type)
     
+    # Kalshi: inject auth from config if not passed
+    if venue_type == VenueType.KALSHI:
+        kalshi_cfg = _kalshi_kwargs()
+        for k, v in kalshi_cfg.items():
+            if k not in kwargs:
+                kwargs[k] = v
+    
     return connector_class(ws_url=ws_url, **kwargs)
 
 
 def _get_default_url(venue_type: VenueType) -> str:
     """Get default WebSocket URL for venue."""
+    if venue_type == VenueType.KALSHI:
+        try:
+            import config
+            url = getattr(config, "KALSHI_WS_URL", None)
+            if url and str(url).strip():
+                return str(url).strip()
+            if getattr(config, "KALSHI_USE_DEMO", False):
+                return "wss://demo-api.kalshi.co/trade-api/ws/v2"
+        except ImportError:
+            pass
+        return "wss://api.elections.kalshi.com/trade-api/ws/v2"
     defaults = {
-        VenueType.KALSHI: "wss://api.kalshi.com/trade-api/v2/websocket",
         VenueType.POLYMARKET: "wss://ws-subscriptions-clob.polymarket.com/ws/market",
     }
     return defaults.get(venue_type, "")

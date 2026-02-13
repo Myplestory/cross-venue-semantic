@@ -116,21 +116,29 @@ async def test_rerank_async_multiple_candidates(mock_cross_encoder, sample_canon
     mock_cross_encoder.extract_primary_event = MagicMock(return_value="Query primary event")
     mock_cross_encoder.extract_secondary_clauses = MagicMock(return_value=["Clause 1"])
     
-    # Return different scores for each candidate
-    mock_cross_encoder.score_batch_async = AsyncMock(return_value=[
-        {"entailment": 0.9, "neutral": 0.05, "contradiction": 0.05},  # High score
-        {"entailment": 0.7, "neutral": 0.2, "contradiction": 0.1},     # Medium score
-        {"entailment": 0.5, "neutral": 0.3, "contradiction": 0.2},    # Low score
-    ])
+    # Batch reranker: Phase 1 scores 3 primary pairs, Phase 3 scores 3 secondary clause pairs
+    def score_batch_side_effect(pairs):
+        n = len(pairs)
+        if n == 3:  # Primary pairs
+            return [
+                {"entailment": 0.9, "neutral": 0.05, "contradiction": 0.05},
+                {"entailment": 0.7, "neutral": 0.2, "contradiction": 0.1},
+                {"entailment": 0.5, "neutral": 0.3, "contradiction": 0.2},
+            ]
+        # Secondary clause pairs (3 pairs: 1 query clause × 1 candidate clause × 3 candidates)
+        return [{"entailment": 0.8, "neutral": 0.15, "contradiction": 0.05} for _ in pairs]
     
-    # Map to confidence scores (decreasing)
+    mock_cross_encoder.score_batch_async = AsyncMock(side_effect=score_batch_side_effect)
+    
+    # Phase 2: 3 primary map_nli calls. Phase 3: 3 secondary map_nli calls (one per clause pair)
     mock_cross_encoder.map_nli_to_confidence = MagicMock(side_effect=[
         (0.9, "full_match"),
         (0.7, "partial_match"),
         (0.5, "no_match"),
+        (0.8, "full_match"),
+        (0.8, "full_match"),
+        (0.8, "full_match"),
     ])
-    
-    mock_cross_encoder.score_secondary_clauses_async = AsyncMock(return_value=0.8)
     
     reranker = CandidateReranker(mock_cross_encoder, score_threshold=0.6, top_k=2)
     await reranker.initialize()
@@ -261,13 +269,20 @@ async def test_rerank_async_with_secondary_clauses(mock_cross_encoder, sample_ca
     mock_cross_encoder.initialize = AsyncMock()
     mock_cross_encoder.extract_primary_event = MagicMock(return_value="Primary event")
     mock_cross_encoder.extract_secondary_clauses = MagicMock(return_value=["Clause 1", "Clause 2"])
-    mock_cross_encoder.score_batch_async = AsyncMock(return_value=[{
-        "entailment": 0.8,
-        "neutral": 0.15,
-        "contradiction": 0.05
-    }])
-    mock_cross_encoder.map_nli_to_confidence = MagicMock(return_value=(0.8, "full_match"))
-    mock_cross_encoder.score_secondary_clauses_async = AsyncMock(return_value=0.75)
+    
+    # Batch reranker: Phase 1 scores 1 primary pair, Phase 3 scores 4 secondary pairs (2×2)
+    nli_primary = {"entailment": 0.8, "neutral": 0.15, "contradiction": 0.05}
+    def score_batch_side_effect(pairs):
+        n = len(pairs)
+        if n == 1:
+            return [nli_primary]
+        return [nli_primary for _ in pairs]  # 4 results for secondary clause pairs
+    mock_cross_encoder.score_batch_async = AsyncMock(side_effect=score_batch_side_effect)
+    
+    # Phase 2: 1 primary. Phase 3: 4 secondary (2 query × 2 candidate clause pairs)
+    mock_cross_encoder.map_nli_to_confidence = MagicMock(
+        side_effect=[(0.8, "full_match")] + [(0.75, "full_match")] * 4
+    )
     
     reranker = CandidateReranker(mock_cross_encoder, primary_weight=0.7, secondary_weight=0.3)
     await reranker.initialize()

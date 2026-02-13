@@ -393,12 +393,12 @@ async def test_score_secondary_clauses_async_matching(mock_nli_pipeline):
                 encoder = CrossEncoder()
                 await encoder.initialize()
                 
-                # Mock high entailment for matching clauses (flat list format)
-                mock_nli_pipeline.return_value = [
-                    {"label": "ENTAILMENT", "score": 0.9},
-                    {"label": "NEUTRAL", "score": 0.05},
-                    {"label": "CONTRADICTION", "score": 0.05}
-                ]
+                # score_secondary_clauses_async uses score_batch_async (not pipeline);
+                # mock it directly to avoid _score_batch_sync tokenizer/model issues
+                nli_result = {"entailment": 0.9, "neutral": 0.05, "contradiction": 0.05}
+                async def mock_score_batch(pairs):
+                    return [nli_result for _ in pairs]
+                encoder.score_batch_async = AsyncMock(side_effect=mock_score_batch)
                 
                 query_clauses = ["Clause 1", "Clause 2"]
                 candidate_clauses = ["Clause 1", "Clause 2"]

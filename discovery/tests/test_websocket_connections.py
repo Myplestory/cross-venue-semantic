@@ -268,6 +268,7 @@ class TestWebSocketConnection:
         with patch("websockets.connect", new_callable=AsyncMock) as mock_connect:
             mock_ws = AsyncMock()
             mock_ws.closed = False
+            mock_ws.close_code = None
             mock_ws.send = AsyncMock()
             
             mock_connect.return_value = mock_ws
@@ -288,10 +289,12 @@ class TestWebSocketConnection:
             # Create two mock websockets for initial and reconnected connections
             mock_ws1 = AsyncMock()
             mock_ws1.closed = False
+            mock_ws1.close_code = None
             mock_ws1.send = AsyncMock()
             
             mock_ws2 = AsyncMock()
             mock_ws2.closed = False
+            mock_ws2.close_code = None
             mock_ws2.send = AsyncMock()
             
             # First connection raises ConnectionClosed immediately
@@ -345,6 +348,7 @@ class TestWebSocketConnection:
         with patch("websockets.connect", new_callable=AsyncMock) as mock_connect:
             mock_ws = AsyncMock()
             mock_ws.closed = False
+            mock_ws.close_code = None
             mock_ws.send = AsyncMock()
             
             # Mock message iteration

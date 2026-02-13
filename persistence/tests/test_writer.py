@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import asyncpg
 from persistence.writer import PipelineWriter, PairWriteRequest
-from conftest import make_write_request
+from persistence.tests.conftest import make_write_request
 
 
 # ═════════════════════════════════════════════════════════════════════

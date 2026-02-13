@@ -34,7 +34,7 @@ def test_create_connector_kalshi():
     
     assert isinstance(connector, KalshiConnector)
     assert connector.venue_name == VenueType.KALSHI
-    assert connector.ws_url == "wss://api.kalshi.com/trade-api/v2/websocket"
+    assert connector.ws_url == "wss://api.elections.kalshi.com/trade-api/ws/v2"
 
 
 def test_create_connector_polymarket():
@@ -106,7 +106,7 @@ def test_register_venue():
 def test_get_default_url():
     """Test getting default URLs."""
     kalshi_url = _get_default_url(VenueType.KALSHI)
-    assert kalshi_url == "wss://api.kalshi.com/trade-api/v2/websocket"
+    assert kalshi_url == "wss://api.elections.kalshi.com/trade-api/ws/v2"
     
     polymarket_url = _get_default_url(VenueType.POLYMARKET)
     assert polymarket_url == "wss://ws-subscriptions-clob.polymarket.com/ws/market"
