@@ -76,7 +76,7 @@ def _kalshi_market(
     ticker: str = "KXBTC-100K",
     title: str = "Will BTC hit $100k?",
     *,
-    status: str = "open",
+    status: str = "active",
 ) -> dict:
     """Build a single Kalshi REST market JSON object."""
     return {
@@ -404,10 +404,10 @@ class TestKalshiBootstrap:
         """Only markets with status=open are returned."""
         response_data = {
             "markets": [
-                _kalshi_market("OPEN-1", "Open market", status="open"),
+                _kalshi_market("OPEN-1", "Open market", status="active"),
                 _kalshi_market("CLOSED-1", "Closed", status="closed"),
                 _kalshi_market("SETTLED-1", "Settled", status="settled"),
-                _kalshi_market("OPEN-2", "Another open", status="open"),
+                _kalshi_market("OPEN-2", "Another open", status="active"),
             ],
             "cursor": None,
         }

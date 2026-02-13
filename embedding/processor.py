@@ -154,6 +154,90 @@ class EmbeddingProcessor:
         
         return embedded_event
     
+    async def process_batch_async(
+        self,
+        canonical_events: List[CanonicalEvent],
+    ) -> List[EmbeddedEvent]:
+        """
+        Process a batch of canonical events and return embedded events.
+
+        Public batch interface for the orchestrator's micro-batch worker.
+        Performs: cache lookup -> batch encode misses -> cache update ->
+        Qdrant upsert -> return.
+
+        This is the batch equivalent of ``process_async()`` -- same logic,
+        but encodes all cache misses in one GPU call via
+        ``encode_batch_async()``.
+
+        Args:
+            canonical_events: List of canonical events to embed.
+
+        Returns:
+            List of EmbeddedEvent objects (same order as input).
+        """
+        if not canonical_events:
+            return []
+
+        # ── Cache lookup ─────────────────────────────────────────────
+        embedded_events: List[EmbeddedEvent] = []
+        cache_misses: List[CanonicalEvent] = []
+        # Preserve insertion order: map content_hash -> slot index
+        order_map: dict = {}
+        result_slots: List[Optional[EmbeddedEvent]] = [
+            None
+        ] * len(canonical_events)
+
+        for idx, event in enumerate(canonical_events):
+            cached_embedding = None
+            if self.cache:
+                cached_embedding = await self.cache.get(event.content_hash)
+
+            if cached_embedding:
+                ee = EmbeddedEvent(
+                    canonical_event=event,
+                    embedding=cached_embedding,
+                    embedding_model=self.encoder.model_name,
+                    embedding_dim=self.encoder.embedding_dim,
+                )
+                result_slots[idx] = ee
+                embedded_events.append(ee)
+            else:
+                cache_misses.append(event)
+                order_map[event.content_hash] = idx
+
+        # ── Batch encode cache misses (1 GPU call) ───────────────────
+        if cache_misses:
+            texts = [e.canonical_text for e in cache_misses]
+            embeddings = await self.encoder.encode_batch_async(texts)
+
+            for event, embedding in zip(cache_misses, embeddings):
+                ee = EmbeddedEvent(
+                    canonical_event=event,
+                    embedding=embedding,
+                    embedding_model=self.encoder.model_name,
+                    embedding_dim=self.encoder.embedding_dim,
+                )
+                result_slots[order_map[event.content_hash]] = ee
+                embedded_events.append(ee)
+
+                if self.cache:
+                    await self.cache.set(event.content_hash, embedding)
+
+        # ── Batch upsert to Qdrant ───────────────────────────────────
+        if embedded_events:
+            await self.index.upsert_async(embedded_events)
+
+        cache_hits = len(canonical_events) - len(cache_misses)
+        logger.info(
+            "Batch processed: %d events (%d cache hits, %d encoded)",
+            len(canonical_events),
+            cache_hits,
+            len(cache_misses),
+        )
+
+        # Return in original input order
+        return [slot for slot in result_slots if slot is not None]
+
     async def enqueue(
         self,
         canonical_event: CanonicalEvent

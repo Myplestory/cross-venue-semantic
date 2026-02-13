@@ -306,6 +306,7 @@ class SemanticPipelineOrchestrator:
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._metrics: PipelineMetrics = PipelineMetrics()
         self._ingestion_log_count: int = 0
+        self._effective_embed_batch: int = config.EMBEDDING_BATCH_SIZE
 
         logger.info(
             "Orchestrator created: venues=%s, workers=%d, queue_size=%d",
@@ -386,17 +387,6 @@ class SemanticPipelineOrchestrator:
         )
         await self._embedding_cache.initialize()
 
-        self._embedding_processor = EmbeddingProcessor(
-            encoder=self._embedding_encoder,
-            index=self._qdrant_index,
-            cache=self._embedding_cache,
-            batch_size=config.EMBEDDING_BATCH_SIZE,
-        )
-        # Sub-components already initialized individually above.
-        # Calling processor.initialize() would redundantly reload the
-        # encoder model — encoder's guard (`if self._initialized: return`)
-        # prevents actual re-load but we skip it for clarity.
-
         # ── 3. Retrieval ────────────────────────────────────────────
         self._retriever = CandidateRetriever(index=self._qdrant_index)
         # Index already initialized above — retriever is ready.
@@ -414,6 +404,43 @@ class SemanticPipelineOrchestrator:
         logger.info(
             "  ✓ Cross-encoder on %s", self._cross_encoder.device
         )
+
+        # ── Auto-tune batch sizes (post-load VRAM probe) ─────────
+        if config.AUTO_BATCH_SIZE:
+            from gpu_utils import auto_tune_batch_sizes
+
+            tune_result = auto_tune_batch_sizes(
+                embedding_encoder=self._embedding_encoder,
+                cross_encoder=self._cross_encoder,
+                max_embedding_batch=config.EMBEDDING_BATCH_SIZE,
+                max_cross_encoder_batch=config.CROSS_ENCODER_BATCH_SIZE,
+            )
+            self._effective_embed_batch = tune_result["embedding_batch_size"]
+            logger.info(
+                "  Auto-tuned: embedding_batch=%d, ce_batch=%d "
+                "(GPU: %s, free=%.0f MB)",
+                tune_result["embedding_batch_size"],
+                tune_result["cross_encoder_batch_size"],
+                tune_result["gpu"].get("name", "N/A"),
+                tune_result["gpu"].get("free_mb", 0),
+            )
+        else:
+            self._effective_embed_batch = config.EMBEDDING_BATCH_SIZE
+            logger.info(
+                "  Auto batch sizing disabled (AUTO_BATCH_SIZE=false)"
+            )
+
+        # ── 2b. Embedding processor (uses tuned batch size) ──────
+        self._embedding_processor = EmbeddingProcessor(
+            encoder=self._embedding_encoder,
+            index=self._qdrant_index,
+            cache=self._embedding_cache,
+            batch_size=self._effective_embed_batch,
+        )
+        # Sub-components already initialized individually above.
+        # Calling processor.initialize() would redundantly reload the
+        # encoder model — encoder's guard (`if self._initialized: return`)
+        # prevents actual re-load but we skip it for clarity.
 
         self._reranker = CandidateReranker(
             cross_encoder=self._cross_encoder,
@@ -896,49 +923,233 @@ class SemanticPipelineOrchestrator:
         """
         Pull events from ingestion queue and process through all stages.
 
-        Each event is fully isolated: a failure in one event does not
-        affect other events or workers.
+        Accumulates up to ``_effective_embed_batch`` events (or flushes
+        on ``WORKER_BATCH_TIMEOUT``) before issuing a single GPU call
+        for the embedding stage.  Retrieval, reranking, extraction,
+        verification, and persistence remain per-event.
+
+        This is the "adaptive micro-batching" pattern used by Triton
+        Inference Server and Ray Serve: GPU-bound stages batch, everything
+        else stays per-event.
 
         Args:
             worker_id: Worker index for structured logging.
         """
         tag = f"worker-{worker_id}"
-        logger.info("[%s] Started", tag)
+        batch_size = self._effective_embed_batch
+        batch_timeout = config.WORKER_BATCH_TIMEOUT
+        logger.info(
+            "[%s] Started (batch_size=%d, timeout=%.1fs)",
+            tag, batch_size, batch_timeout,
+        )
 
         while self._running or not self._ingestion_queue.empty():
-            try:
-                # Non-blocking get with short timeout so we can re-check
-                # the _running flag periodically.
+            # ── Phase 1: Accumulate micro-batch ──────────────────
+            batch: List[MarketEvent] = []
+            deadline = time.monotonic() + batch_timeout
+            sentinel_seen = False
+
+            while len(batch) < batch_size:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break  # Timeout — flush what we have
+
                 try:
-                    event: Optional[MarketEvent] = await asyncio.wait_for(
-                        self._ingestion_queue.get(), timeout=0.5
+                    event = await asyncio.wait_for(
+                        self._ingestion_queue.get(),
+                        timeout=max(remaining, 0.01),
                     )
                 except asyncio.TimeoutError:
-                    continue
-
-                # Sentinel = clean shutdown
-                if event is None:
-                    logger.debug("[%s] Received sentinel, exiting", tag)
+                    break
+                except asyncio.CancelledError:
+                    sentinel_seen = True
                     break
 
-                await self._process_event(event, tag)
+                if event is None:  # Sentinel = clean shutdown
+                    sentinel_seen = True
+                    break
 
+                batch.append(event)
+
+            if not batch:
+                if sentinel_seen:
+                    break
+                continue
+
+            # ── Phase 2: Process the batch ───────────────────────
+            try:
+                await self._process_event_batch(batch, tag)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                # Should never happen — _process_event has its own guard.
                 logger.error(
-                    "[%s] Unexpected worker-level error: %s",
-                    tag,
-                    exc,
-                    exc_info=True,
+                    "[%s] Batch processing failed (%d events): %s",
+                    tag, len(batch), exc, exc_info=True,
                 )
-                self._metrics.events_failed += 1
+                self._metrics.events_failed += len(batch)
+
+            if sentinel_seen:
+                break
 
         logger.info("[%s] Stopped", tag)
 
     # ═══════════════════════════════════════════════════════════════════
-    #  Per-event pipeline
+    #  Micro-batch pipeline
+    # ═══════════════════════════════════════════════════════════════════
+
+    async def _process_event_batch(
+        self,
+        events: List[MarketEvent],
+        tag: str,
+    ) -> None:
+        """
+        Process a micro-batch of MarketEvents through all pipeline stages.
+
+        GPU-bound stages (embedding) are batched into a single call.
+        CPU/network stages (retrieval, reranking, extraction, verification,
+        persistence) remain per-event.
+
+        Stages:
+        1. Canonicalize all       (CPU, <5 ms each)
+        2. Batch embed + upsert   (1 GPU call for all events)
+        3-7. Per-event: Retrieve -> Rerank -> Extract -> Verify -> Persist
+
+        Falls back gracefully on per-event errors so one bad event
+        doesn't block the batch.
+
+        Args:
+            events: List of MarketEvents from ingestion queue.
+            tag: Worker tag for structured logging.
+        """
+        n = len(events)
+        batch_t0 = time.monotonic()
+
+        # ── Stage 1: Canonicalize all (CPU) ──────────────────────
+        canonical_events: List[CanonicalEvent] = []
+        source_events: List[MarketEvent] = []
+
+        for event in events:
+            try:
+                t0 = time.monotonic()
+                canonical = self._canonicalize(event)
+                self._metrics.canonicalization.record(
+                    (time.monotonic() - t0) * 1000
+                )
+                canonical_events.append(canonical)
+                source_events.append(event)
+            except Exception as exc:
+                event_id = f"{event.venue.value}:{event.venue_market_id}"
+                logger.error(
+                    "[%s] Canonicalization failed for %s: %s",
+                    tag, event_id, exc, exc_info=True,
+                )
+                self._metrics.events_failed += 1
+
+        if not canonical_events:
+            return
+
+        # ── Stage 2: Batch embed (1 GPU call) ───────────────────
+        t0 = time.monotonic()
+        try:
+            embedded_events = (
+                await self._embedding_processor.process_batch_async(
+                    canonical_events
+                )
+            )
+        except Exception as exc:
+            logger.error(
+                "[%s] Batch embedding failed (%d events): %s",
+                tag, len(canonical_events), exc, exc_info=True,
+            )
+            self._metrics.events_failed += len(canonical_events)
+            return
+
+        embed_ms = (time.monotonic() - t0) * 1000
+        per_event_ms = embed_ms / len(embedded_events) if embedded_events else 0
+        for _ in embedded_events:
+            self._metrics.embedding.record(per_event_ms)
+
+        # ── Stages 3-7: Per-event (retrieve -> rerank -> persist) ─
+        for embedded_event, source_event in zip(
+            embedded_events, source_events
+        ):
+            canonical_event = embedded_event.canonical_event
+            event_id = (
+                f"{source_event.venue.value}:"
+                f"{source_event.venue_market_id}"
+            )
+            event_t0 = time.monotonic()
+
+            try:
+                # Stage 3: Retrieval
+                t0 = time.monotonic()
+                candidates = await self._retriever.retrieve_candidates(
+                    embedded_event,
+                    exclude_venue=source_event.venue,
+                )
+                self._metrics.retrieval.record(
+                    (time.monotonic() - t0) * 1000
+                )
+
+                if not candidates:
+                    self._metrics.events_no_candidates += 1
+                    self._metrics.events_processed += 1
+                    continue
+
+                # Stage 4: Reranking
+                t0 = time.monotonic()
+                verified_matches: List[VerifiedMatch] = (
+                    await self._reranker.rerank_async(
+                        canonical_event, candidates
+                    )
+                )
+                self._metrics.reranking.record(
+                    (time.monotonic() - t0) * 1000
+                )
+
+                if not verified_matches:
+                    self._metrics.events_processed += 1
+                    continue
+
+                self._metrics.pairs_found += len(verified_matches)
+
+                # Stages 5-7: per-match processing
+                for match in verified_matches:
+                    try:
+                        await self._process_match(
+                            canonical_event, match, tag
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "[%s] Match processing failed for %s: %s",
+                            tag, event_id, exc, exc_info=True,
+                        )
+
+                self._metrics.events_processed += 1
+
+                elapsed_ms = (time.monotonic() - event_t0) * 1000
+                logger.info(
+                    "[%s] %s -> %d candidates, %d matches, %.0f ms",
+                    tag, event_id,
+                    len(candidates), len(verified_matches),
+                    elapsed_ms,
+                )
+
+            except Exception as exc:
+                self._metrics.events_failed += 1
+                logger.error(
+                    "[%s] Pipeline failed for %s: %s",
+                    tag, event_id, exc, exc_info=True,
+                )
+
+        batch_ms = (time.monotonic() - batch_t0) * 1000
+        logger.info(
+            "[%s] Batch complete: %d events in %.0f ms (%.0f ms/event)",
+            tag, n, batch_ms, batch_ms / n if n else 0,
+        )
+
+    # ═══════════════════════════════════════════════════════════════════
+    #  Per-event pipeline (fallback / test utility)
     # ═══════════════════════════════════════════════════════════════════
 
     async def _process_event(
@@ -947,12 +1158,15 @@ class SemanticPipelineOrchestrator:
         """
         Process a single MarketEvent through all pipeline stages.
 
+        Retained as a fallback / test utility.  The production worker
+        uses ``_process_event_batch()`` for GPU-efficient micro-batching.
+
         Stages:
         1. Canonicalize          (CPU, <5 ms)
         2. Embed + Qdrant upsert (GPU + network)
         3. Retrieve candidates   (network)
         4. Rerank                (GPU / CPU)
-        5–7. Per-match: Extract → Verify → Persist
+        5-7. Per-match: Extract -> Verify -> Persist
 
         Args:
             event: MarketEvent from discovery.

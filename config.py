@@ -15,10 +15,10 @@ load_dotenv(_env_path)
 
 # Log if .env was loaded
 if _env_path.exists():
-    print(f"✅ Loaded .env from: {_env_path}")
+    print(f"[OK] Loaded .env from: {_env_path}")
 else:
-    print(f"⚠️  .env file not found at: {_env_path}")
-    print("   Using environment variables and defaults")
+    print(f"[WARN] .env file not found at: {_env_path}")
+    print("       Using environment variables and defaults")
 
 
 def get_env(key: str, default: Optional[str] = None) -> Optional[str]:
@@ -121,7 +121,7 @@ CROSS_ENCODER_SECONDARY_WEIGHT = get_env_float("CROSS_ENCODER_SECONDARY_WEIGHT",
 CROSS_ENCODER_TOP_K = get_env_int("CROSS_ENCODER_TOP_K", 10)
 
 # ContractSpec Extraction Configuration
-EXTRACTION_USE_LLM_FALLBACK = get_env_bool("EXTRACTION_USE_LLM_FALLBACK", True)
+EXTRACTION_USE_LLM_FALLBACK = get_env_bool("EXTRACTION_USE_LLM_FALLBACK", False)
 EXTRACTION_CONFIDENCE_THRESHOLD = get_env_float("EXTRACTION_CONFIDENCE_THRESHOLD", 0.7)
 EXTRACTION_HIGH_CONFIDENCE_THRESHOLD = get_env_float("EXTRACTION_HIGH_CONFIDENCE_THRESHOLD", 0.9)
 EXTRACTION_LLM_MODEL = get_env("EXTRACTION_LLM_MODEL", "gpt-4o-mini")
@@ -165,6 +165,17 @@ WRITER_NOTIFY_CHANNEL = get_env("WRITER_NOTIFY_CHANNEL", "pair_changes")
 # 1 = serialize (safest, zero extra VRAM).  2 = allow overlap (~+1 GB peak).
 EMBEDDING_GPU_CONCURRENCY = get_env_int("EMBEDDING_GPU_CONCURRENCY", 1)
 CROSS_ENCODER_GPU_CONCURRENCY = get_env_int("CROSS_ENCODER_GPU_CONCURRENCY", 1)
+
+# Dynamic Batch Sizing
+# When true, batch sizes are computed at startup from free VRAM.
+# EMBEDDING_BATCH_SIZE / CROSS_ENCODER_BATCH_SIZE become ceilings (never exceeded).
+# When false, config values are used as-is.
+AUTO_BATCH_SIZE = get_env_bool("AUTO_BATCH_SIZE", True)
+
+# Micro-batch accumulation timeout (seconds).
+# Worker waits up to this long to fill a batch before flushing.
+# Lower = less latency for sparse event streams. Higher = fuller batches.
+WORKER_BATCH_TIMEOUT = get_env_float("WORKER_BATCH_TIMEOUT", 1.0)
 
 # Logging
 LOG_LEVEL = get_env("LOG_LEVEL", "INFO")
@@ -245,6 +256,8 @@ def print_config_summary() -> None:
     print(f"  ORCHESTRATOR_NUM_WORKERS: {ORCHESTRATOR_NUM_WORKERS}")
     print(f"  EMBEDDING_GPU_CONCURRENCY: {EMBEDDING_GPU_CONCURRENCY}")
     print(f"  CROSS_ENCODER_GPU_CONCURRENCY: {CROSS_ENCODER_GPU_CONCURRENCY}")
+    print(f"  AUTO_BATCH_SIZE: {AUTO_BATCH_SIZE}")
+    print(f"  WORKER_BATCH_TIMEOUT: {WORKER_BATCH_TIMEOUT}")
     print(f"  BOOTSTRAP_ENABLED: {BOOTSTRAP_ENABLED}")
     print(f"  BOOTSTRAP_MAX_MARKETS_PER_VENUE: {BOOTSTRAP_MAX_MARKETS_PER_VENUE or 'unlimited'}")
     print(f"  BOOTSTRAP_FETCH_TIMEOUT: {BOOTSTRAP_FETCH_TIMEOUT}")

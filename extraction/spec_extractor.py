@@ -43,7 +43,7 @@ class ContractSpecExtractor:
     
     def __init__(
         self,
-        use_llm_fallback: bool = True,
+        use_llm_fallback: bool = False,
         confidence_threshold: float = 0.7,
         high_confidence_threshold: float = 0.9,
         track_evidence_spans: bool = False,
@@ -128,7 +128,11 @@ class ContractSpecExtractor:
                 await self.cache.set(content_hash, llm_spec)
                 return llm_spec
             except CircuitBreakerOpenError:
-                logger.warning("LLM fallback unavailable, using rule-based result")
+                logger.warning("LLM fallback unavailable (circuit open), using rule-based result")
+                await self.cache.set(content_hash, spec)
+                return spec
+            except RuntimeError as exc:
+                logger.warning("LLM fallback unavailable (%s), using rule-based result", exc)
                 await self.cache.set(content_hash, spec)
                 return spec
         

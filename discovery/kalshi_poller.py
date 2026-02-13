@@ -201,11 +201,14 @@ class KalshiConnector(BaseVenueConnector):
         max_markets: int = 0,
     ) -> List[MarketEvent]:
         """
-        Fetch currently active (open) markets via REST.
+        Fetch currently active markets via REST.
 
         Uses ``GET /trade-api/v2/markets?status=open&limit=1000`` with
-        cursor pagination.  The ``status=open`` server-side filter ensures
-        only actively-trading markets are returned — no wasted requests.
+        cursor pagination.  The Kalshi API accepts ``status=open`` as
+        the query filter, but the response ``status`` field returns
+        ``"active"`` for tradeable markets.  We query with
+        ``status=open`` and accept both ``"active"`` and ``"open"``
+        client-side for safety.
 
         Args:
             deadline: ``asyncio`` loop time after which to return partial
@@ -215,7 +218,7 @@ class KalshiConnector(BaseVenueConnector):
                 Useful for dev/testing to limit bootstrap scope.
 
         Returns:
-            List of ``MarketEvent`` objects, one per open market.
+            List of ``MarketEvent`` objects, one per active market.
         """
         import aiohttp
 
@@ -297,18 +300,26 @@ class KalshiConnector(BaseVenueConnector):
 
                     assert data is not None
                     markets = data.get("markets") or []
-                    open_count = sum(1 for m in markets if (m.get("status") or "").lower() == "open")
+                    # Kalshi API docs list query param as "open" but the
+                    # response status field returns "active" for tradeable
+                    # markets.  Accept both to be safe.
+                    _ACTIVE_STATUSES = {"active", "open"}
+                    active_count = sum(
+                        1 for m in markets
+                        if (m.get("status") or "").lower() in _ACTIVE_STATUSES
+                    )
+
                     logger.debug(
-                        "[Kalshi] Bootstrap: page %d got %d markets (%d open), cursor=%s",
+                        "[Kalshi] Bootstrap: page %d got %d markets (%d active), cursor=%s",
                         page,
                         len(markets),
-                        open_count,
+                        active_count,
                         "yes" if data.get("cursor") else "no",
                     )
 
                     for m in markets:
-                        # Only include active (open) markets; skip closed/settled/unopened
-                        if (m.get("status") or "").lower() != "open":
+                        # Only include active markets; skip closed/settled/unopened
+                        if (m.get("status") or "").lower() not in _ACTIVE_STATUSES:
                             continue
                         ticker = m.get("ticker") or ""
                         if not ticker:
@@ -358,7 +369,7 @@ class KalshiConnector(BaseVenueConnector):
             logger.warning("[Kalshi] Bootstrap failed: %s", e)
 
         logger.info(
-            "[Kalshi] Bootstrap: fetched %d open market(s) in %d page(s)",
+            "[Kalshi] Bootstrap: fetched %d active market(s) in %d page(s)",
             len(events),
             page,
         )
