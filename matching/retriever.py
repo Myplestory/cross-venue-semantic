@@ -206,11 +206,21 @@ class CandidateRetriever:
                     logger.warning(f"Missing required fields in payload: {payload}")
                     continue
                 
+                # Prefer stored title; fall back to line 2 of canonical_text
+                # (line 1 is always the "Market Statement:" header)
+                title = payload.get("title") or ""
+                if not title:
+                    lines = canonical_text.split('\n')
+                    if len(lines) > 1 and lines[0].startswith("Market Statement"):
+                        title = lines[1]
+                    else:
+                        title = lines[0] if lines else ""
+                
                 market_event = MarketEvent(
                     venue=venue,
                     venue_market_id=venue_market_id,
                     event_type=EventType.CREATED,
-                    title=canonical_text.split('\n')[0] if canonical_text else "",
+                    title=title,
                     description=canonical_text,
                     received_at=datetime.now(UTC),
                 )

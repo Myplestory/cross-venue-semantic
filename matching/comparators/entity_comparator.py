@@ -49,12 +49,12 @@ class EntityComparator:
         if not self._initialized:
             await self.initialize()
         
-        # Both empty
+        # Both empty — neutral; extraction yielded nothing for either side
         if not entities_a and not entities_b:
-            return (1.0, {
-                "match": True,
+            return (0.5, {
+                "match": False,
                 "reason": "both_empty",
-                "score": 1.0,
+                "score": 0.5,
                 "matched_count": 0,
                 "total_count": 0
             })

@@ -138,7 +138,7 @@ def verified_pair(contract_spec_a, contract_spec_b):
             "entity_score": 0.95,
             "threshold_score": 1.0,
             "date_score": 1.0,
-            "data_source_match": True,
+            "data_source_score": 1.0,
             "weighted_score": 0.93,
         },
     )

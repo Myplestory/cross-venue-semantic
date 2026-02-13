@@ -601,6 +601,7 @@ class PipelineWriter:
 
         # Step 2: Insert new current version
         outcome_json = json.dumps(pair.outcome_mapping)
+        evidence_json = json.dumps(pair.comparison_details)
 
         row = await conn.fetchrow(
             """
@@ -608,11 +609,13 @@ class PipelineWriter:
                 pair_key, market_a_id, market_b_id,
                 contract_spec_a_id, contract_spec_b_id,
                 outcome_mapping, verdict,
+                confidence_score, evidence, verified_at,
                 is_current, is_active
             ) VALUES (
                 $1, $2::uuid, $3::uuid,
                 $4::uuid, $5::uuid,
                 $6::jsonb, $7::pair_verdict,
+                $8, $9, $10,
                 true, true
             )
             RETURNING id
@@ -624,6 +627,9 @@ class PipelineWriter:
             spec_b_uuid,
             outcome_json,
             pair.verdict,
+            pair.confidence,
+            evidence_json,
+            pair.verified_at,
         )
 
         return str(row["id"])

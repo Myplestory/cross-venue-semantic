@@ -324,6 +324,11 @@ class KalshiConnector(BaseVenueConnector):
                         ticker = m.get("ticker") or ""
                         if not ticker:
                             continue
+                        # Skip multi-game parlay/combo markets — they combine
+                        # multiple independent bets and can never match a
+                        # single-outcome market on another venue.
+                        if "MULTIGAME" in ticker.upper():
+                            continue
                         title = m.get("title") or m.get("subtitle") or ticker
                         description = m.get("rules_primary") or m.get("rules_secondary")
                         end_date = None
@@ -414,6 +419,10 @@ class KalshiConnector(BaseVenueConnector):
                 msg = data.get("msg") or {}
                 market_ticker = msg.get("market_ticker") or ""
                 if not market_ticker:
+                    return None
+                # Skip multi-game parlay/combo markets
+                if "MULTIGAME" in market_ticker.upper():
+                    logger.debug("[Kalshi] Skipping multi-game parlay: %s", market_ticker)
                     return None
                 event_type_str = (msg.get("event_type") or "").lower()
                 if event_type_str in ("deactivated", "determined", "settled"):

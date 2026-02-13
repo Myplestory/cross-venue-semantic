@@ -63,14 +63,14 @@ class DateComparator:
                 "score": 0.5
             })
         
-        # One date missing — ambiguous, not a critical mismatch
+        # One date missing — neutral; we lack data to compare
         if date_a is None or date_b is None:
-            return (0.3, {
+            return (0.5, {
                 "match": False,
                 "reason": "one_missing",
                 "date_a": date_a.date.isoformat() if date_a else None,
                 "date_b": date_b.date.isoformat() if date_b else None,
-                "score": 0.3
+                "score": 0.5
             })
         
         # Calculate date difference

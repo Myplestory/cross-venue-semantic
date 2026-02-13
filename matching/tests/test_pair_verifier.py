@@ -232,7 +232,7 @@ async def test_pair_verifier_weighted_score_calculation():
         entity_score=0.8,
         threshold_score=0.9,
         date_score=0.95,
-        data_source_match=True,
+        data_source_score=1.0,
         cross_encoder_score=0.85
     )
     
@@ -241,7 +241,7 @@ async def test_pair_verifier_weighted_score_calculation():
         0.15 * 0.8 +  # entity
         0.20 * 0.9 +  # threshold
         0.10 * 0.95 +  # date
-        0.05 * 1.0 +  # data_source
+        0.05 * 1.0 +  # data_source (matched)
         0.50 * 0.85   # cross_encoder (PRIMARY)
     )
     

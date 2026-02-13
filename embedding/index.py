@@ -235,6 +235,7 @@ class QdrantIndex:
                 payload={
                     "venue": event.canonical_event.event.venue.value,
                     "venue_market_id": event.canonical_event.event.venue_market_id,
+                    "title": event.canonical_event.event.title,
                     "identity_hash": event.canonical_event.identity_hash,
                     "content_hash": event.canonical_event.content_hash,
                     "canonical_text": event.canonical_event.canonical_text,

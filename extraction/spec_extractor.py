@@ -166,7 +166,7 @@ class ContractSpecExtractor:
         dates_task = self.date_parser.parse_dates(canonical_text, date_str_val)
         entities_task = self.entity_extractor.extract_entities(statement_text, criteria_text)
         thresholds_task = self.threshold_extractor.extract_thresholds(statement_text, criteria_text)
-        data_source_task = self.data_source_extractor.extract_data_source(criteria_text)
+        data_source_task = self.data_source_extractor.extract_data_source(criteria_text, statement_text)
         
         dates, entities, thresholds, data_source = await asyncio.gather(
             dates_task, entities_task, thresholds_task, data_source_task

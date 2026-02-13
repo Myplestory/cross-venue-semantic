@@ -309,11 +309,10 @@ class PairVerifier:
                 entity_task, threshold_task, date_task
             )
             
-            # Data source matching
-            data_source_match = (
-                contract_spec_a.data_source is not None and
-                contract_spec_b.data_source is not None and
-                contract_spec_a.data_source.lower() == contract_spec_b.data_source.lower()
+            # Data source scoring
+            data_source_score = self._score_data_source(
+                contract_spec_a.data_source,
+                contract_spec_b.data_source,
             )
             
             # Calculate weighted score
@@ -321,7 +320,7 @@ class PairVerifier:
                 entity_score,
                 threshold_score,
                 date_score,
-                data_source_match,
+                data_source_score,
                 verified_match.cross_encoder_score
             )
             
@@ -338,7 +337,7 @@ class PairVerifier:
                 "entity_score": entity_score,
                 "threshold_score": threshold_score,
                 "date_score": date_score,
-                "data_source_match": data_source_match,
+                "data_source_score": data_source_score,
                 "weighted_score": weighted_score,
                 "fast_path": "binary_market"
             }
@@ -412,11 +411,10 @@ class PairVerifier:
             contract_spec_b
         )
         
-        # Data source matching
-        data_source_match = (
-            contract_spec_a.data_source is not None and
-            contract_spec_b.data_source is not None and
-            contract_spec_a.data_source.lower() == contract_spec_b.data_source.lower()
+        # Data source scoring
+        data_source_score = self._score_data_source(
+            contract_spec_a.data_source,
+            contract_spec_b.data_source,
         )
         
         # Calculate weighted score
@@ -424,7 +422,7 @@ class PairVerifier:
             entity_score,
             threshold_score,
             date_score,
-            data_source_match,
+            data_source_score,
             verified_match.cross_encoder_score
         )
         
@@ -441,7 +439,7 @@ class PairVerifier:
             "entity_score": entity_score,
             "threshold_score": threshold_score,
             "date_score": date_score,
-            "data_source_match": data_source_match,
+            "data_source_score": data_source_score,
             "weighted_score": weighted_score,
             "entity_details": entity_details,
             "threshold_details": threshold_details,
@@ -547,12 +545,31 @@ class PairVerifier:
             len(spec_b.outcome_labels) == 2
         )
     
+    @staticmethod
+    def _score_data_source(
+        source_a: Optional[str],
+        source_b: Optional[str],
+    ) -> float:
+        """
+        Score data-source compatibility.
+        
+        Returns:
+            1.0 — both present and matching
+            0.5 — one or both unknown (neutral)
+            0.0 — both present but different (active mismatch)
+        """
+        if source_a is None or source_b is None:
+            return 0.5  # unknown — neutral
+        if source_a.lower() == source_b.lower():
+            return 1.0  # same source — strong positive
+        return 0.0      # different sources — active mismatch
+    
     def _calculate_weighted_score(
         self,
         entity_score: float,
         threshold_score: float,
         date_score: float,
-        data_source_match: bool,
+        data_source_score: float,
         cross_encoder_score: float
     ) -> float:
         """
@@ -565,7 +582,7 @@ class PairVerifier:
             self.entity_weight * entity_score +
             self.threshold_weight * threshold_score +
             self.date_weight * date_score +
-            self.data_source_weight * (1.0 if data_source_match else 0.5) +
+            self.data_source_weight * data_source_score +
             self.cross_encoder_weight * cross_encoder_score  # PRIMARY SIGNAL
         )
     
@@ -589,10 +606,12 @@ class PairVerifier:
         EPSILON = 1e-9
         
         # Critical mismatch check (early exit)
+        # Date floor raised to 0.5 so that >30-day gaps (score=0.3) are
+        # rejected outright rather than leaking into needs_review.
         if (
             entity_score < self.entity_tolerance * 0.5 - EPSILON or
             threshold_score < 0.3 - EPSILON or
-            date_score < 0.3 - EPSILON
+            date_score < 0.5 - EPSILON
         ):
             return ("not_equivalent", weighted_score)
         
