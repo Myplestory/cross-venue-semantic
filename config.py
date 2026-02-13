@@ -166,6 +166,9 @@ WRITER_NOTIFY_CHANNEL = get_env("WRITER_NOTIFY_CHANNEL", "pair_changes")
 EMBEDDING_GPU_CONCURRENCY = get_env_int("EMBEDDING_GPU_CONCURRENCY", 1)
 CROSS_ENCODER_GPU_CONCURRENCY = get_env_int("CROSS_ENCODER_GPU_CONCURRENCY", 1)
 
+# Logging
+LOG_LEVEL = get_env("LOG_LEVEL", "INFO")
+
 # Orchestrator Configuration
 ORCHESTRATOR_VENUES = get_env("ORCHESTRATOR_VENUES", "kalshi,polymarket")
 ORCHESTRATOR_INGESTION_QUEUE_SIZE = get_env_int("ORCHESTRATOR_INGESTION_QUEUE_SIZE", 1000)
@@ -173,6 +176,29 @@ ORCHESTRATOR_NUM_WORKERS = get_env_int("ORCHESTRATOR_NUM_WORKERS", 1)
 ORCHESTRATOR_MODEL_ID = get_env("ORCHESTRATOR_MODEL_ID", "rule-based-v1")
 ORCHESTRATOR_PROMPT_VERSION = get_env("ORCHESTRATOR_PROMPT_VERSION", "v1.0")
 ORCHESTRATOR_DEDUP_TTL = get_env_int("ORCHESTRATOR_DEDUP_TTL", 3600)
+
+# Bootstrap Configuration
+# On startup, fetch all currently-active markets via REST before switching
+# to WebSocket streaming.  Server-side filters (Kalshi: status=open,
+# Polymarket: closed=false + active=true) ensure every fetched market is
+# actively trading — no wasted requests.
+BOOTSTRAP_ENABLED = get_env_bool("BOOTSTRAP_ENABLED", True)
+# Cap per venue (0 = unlimited).  Useful for dev/testing to avoid
+# bootstrapping thousands of markets (~25+ hours on an 8 GB GPU).
+BOOTSTRAP_MAX_MARKETS_PER_VENUE = get_env_int("BOOTSTRAP_MAX_MARKETS_PER_VENUE", 0)
+# Hard timeout for the REST fetch phase per venue (seconds).
+BOOTSTRAP_FETCH_TIMEOUT = get_env_float("BOOTSTRAP_FETCH_TIMEOUT", 120.0)
+# Deadline is slightly shorter than timeout so connectors can return
+# partial results before the outer wait_for cancels them.
+BOOTSTRAP_FETCH_DEADLINE = get_env_float("BOOTSTRAP_FETCH_DEADLINE", 110.0)
+# Per-event enqueue timeout (seconds).  await queue.put() blocks if the
+# queue is full; if it stays full for this long, drop the event.
+BOOTSTRAP_ENQUEUE_TIMEOUT = get_env_float("BOOTSTRAP_ENQUEUE_TIMEOUT", 10.0)
+
+# Polymarket Gamma REST API (no auth required)
+POLYMARKET_GAMMA_API_URL = get_env(
+    "POLYMARKET_GAMMA_API_URL", "https://gamma-api.polymarket.com"
+)
 
 # Kalshi WebSocket auth (required for wss://api.elections.kalshi.com/trade-api/ws/v2)
 # API keys: https://docs.kalshi.com/getting_started/api_keys
@@ -193,6 +219,7 @@ def print_config_summary() -> None:
     Masks sensitive values like API keys.
     """
     print("\n📋 Semantic Pipeline Configuration:")
+    print(f"  LOG_LEVEL: {LOG_LEVEL}")
     print(f"  QDRANT_URL: {QDRANT_URL}")
     print(f"  QDRANT_API_KEY: {'***' + QDRANT_API_KEY[-4:] if QDRANT_API_KEY else 'Not set'}")
     print(f"  QDRANT_COLLECTION: {QDRANT_COLLECTION_NAME}")
@@ -218,6 +245,11 @@ def print_config_summary() -> None:
     print(f"  ORCHESTRATOR_NUM_WORKERS: {ORCHESTRATOR_NUM_WORKERS}")
     print(f"  EMBEDDING_GPU_CONCURRENCY: {EMBEDDING_GPU_CONCURRENCY}")
     print(f"  CROSS_ENCODER_GPU_CONCURRENCY: {CROSS_ENCODER_GPU_CONCURRENCY}")
+    print(f"  BOOTSTRAP_ENABLED: {BOOTSTRAP_ENABLED}")
+    print(f"  BOOTSTRAP_MAX_MARKETS_PER_VENUE: {BOOTSTRAP_MAX_MARKETS_PER_VENUE or 'unlimited'}")
+    print(f"  BOOTSTRAP_FETCH_TIMEOUT: {BOOTSTRAP_FETCH_TIMEOUT}")
+    print(f"  BOOTSTRAP_ENQUEUE_TIMEOUT: {BOOTSTRAP_ENQUEUE_TIMEOUT}")
+    print(f"  POLYMARKET_GAMMA_API_URL: {POLYMARKET_GAMMA_API_URL}")
     print(f"  ORCHESTRATOR_MODEL_ID: {ORCHESTRATOR_MODEL_ID}")
     print(f"  ORCHESTRATOR_PROMPT_VERSION: {ORCHESTRATOR_PROMPT_VERSION}")
     print(f"  KALSHI_API_KEY_ID: {'***' + KALSHI_API_KEY_ID[-4:] if KALSHI_API_KEY_ID else 'Not set'}")

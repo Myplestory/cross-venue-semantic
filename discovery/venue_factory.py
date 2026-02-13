@@ -109,7 +109,17 @@ def create_connector(
         for k, v in kalshi_cfg.items():
             if k not in kwargs:
                 kwargs[k] = v
-    
+
+    # Polymarket: inject Gamma API URL from config if not passed
+    if venue_type == VenueType.POLYMARKET and "gamma_api_url" not in kwargs:
+        try:
+            import config as _cfg
+            gamma_url = getattr(_cfg, "POLYMARKET_GAMMA_API_URL", None)
+            if gamma_url and str(gamma_url).strip():
+                kwargs["gamma_api_url"] = str(gamma_url).strip()
+        except ImportError:
+            pass
+
     return connector_class(ws_url=ws_url, **kwargs)
 
 

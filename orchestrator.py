@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import logging
+import os
 import signal
 import sys
 import time
@@ -497,67 +498,47 @@ class SemanticPipelineOrchestrator:
             )
             self._worker_tasks.append(task)
 
-        # ── Bootstrap: REST fetch of current markets (e.g. Kalshi) ───
-        # Non-blocking put: put_nowait; on full queue yield to workers and retry once.
-        # Hard timeout so a stuck REST call never blocks startup. Pass deadline so connector
-        # can return partial results before we cancel (avoids losing all bootstrap data).
-        _BOOTSTRAP_TIMEOUT = 90.0
-        _BOOTSTRAP_DEADLINE_SEC = 85.0  # return partial results this many seconds in
-        for connector in self._connectors:
-            if not hasattr(connector, "fetch_bootstrap_markets"):
-                continue
-            venue = connector.venue_name.value
-            try:
-                logger.info("[%s] Bootstrap: fetching current markets (timeout %.0fs)...", venue, _BOOTSTRAP_TIMEOUT)
-                loop = asyncio.get_event_loop()
-                deadline = loop.time() + _BOOTSTRAP_DEADLINE_SEC
-                bootstrap_events = await asyncio.wait_for(
-                    connector.fetch_bootstrap_markets(deadline=deadline),
-                    timeout=_BOOTSTRAP_TIMEOUT,
+        # ── Bootstrap: parallel REST fetch of active markets ─────────
+        # Both Kalshi (auth, ~200-500 markets) and Polymarket (no auth,
+        # ~1500-3000 markets) use server-side filters so only actively-
+        # trading markets are returned — zero wasted requests.
+        #
+        # Venues are bootstrapped in parallel (asyncio.gather) since they
+        # hit independent APIs.  Each venue uses bounded enqueue
+        # (await queue.put with timeout) instead of put_nowait so the
+        # REST fetcher naturally throttles when workers can't keep up —
+        # preventing queue overflow and event drops.
+        if config.BOOTSTRAP_ENABLED:
+            bootstrap_connectors = [
+                c
+                for c in self._connectors
+                if hasattr(c, "fetch_bootstrap_markets")
+            ]
+            if bootstrap_connectors:
+                logger.info(
+                    "Bootstrap: %d venue(s) with REST bootstrap (%s)",
+                    len(bootstrap_connectors),
+                    ", ".join(c.venue_name.value for c in bootstrap_connectors),
                 )
-                enqueued = 0
-                dropped = 0
-                for event in bootstrap_events:
-                    self._metrics.events_received += 1
-                    if self._deduplicator.is_duplicate(event):
-                        self._metrics.events_deduplicated += 1
-                        continue
-                    try:
-                        self._ingestion_queue.put_nowait(event)
-                        enqueued += 1
-                    except asyncio.QueueFull:
-                        await asyncio.sleep(0.05)  # yield to workers
-                        try:
-                            self._ingestion_queue.put_nowait(event)
-                            enqueued += 1
-                        except asyncio.QueueFull:
-                            dropped += 1
-                if dropped:
-                    logger.warning(
-                        "[%s] Bootstrap: queue full, dropped %d market(s)",
-                        venue,
-                        dropped,
-                    )
-                if bootstrap_events:
-                    logger.info(
-                        "[%s] Bootstrap: enqueued %d/%d market(s) for pipeline",
-                        venue,
-                        enqueued,
-                        len(bootstrap_events),
-                    )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "[%s] Bootstrap timed out after %.0fs — skipping REST bootstrap, WebSocket will stream updates",
-                    venue,
-                    _BOOTSTRAP_TIMEOUT,
+                results = await asyncio.gather(
+                    *[
+                        self._bootstrap_venue(c)
+                        for c in bootstrap_connectors
+                    ],
+                    return_exceptions=True,
                 )
-            except Exception as exc:
-                logger.warning(
-                    "[%s] Bootstrap failed: %s",
-                    venue,
-                    exc,
-                    exc_info=True,
-                )
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.warning(
+                            "Bootstrap error for %s: %s",
+                            bootstrap_connectors[i].venue_name.value,
+                            result,
+                            exc_info=result,
+                        )
+            else:
+                logger.info("Bootstrap: no connectors support REST bootstrap")
+        else:
+            logger.info("Bootstrap disabled (BOOTSTRAP_ENABLED=false)")
 
         # ── Start venue connector ingestion tasks ───────────────────
         for connector in self._connectors:
@@ -684,6 +665,124 @@ class SemanticPipelineOrchestrator:
 
         # ── 9. Unblock run() ────────────────────────────────────────
         self._shutdown_event.set()
+
+    # ═══════════════════════════════════════════════════════════════════
+    #  Bootstrap (REST fetch → bounded enqueue)
+    # ═══════════════════════════════════════════════════════════════════
+
+    async def _bootstrap_venue(
+        self, connector: BaseVenueConnector
+    ) -> None:
+        """
+        Bootstrap a single venue: REST fetch → dedup → bounded enqueue.
+
+        Server-side filters ensure **only active markets** are fetched:
+
+        - **Kalshi**: ``status=open`` (excludes closed / settled / unopened)
+        - **Polymarket**: ``closed=false`` + ``active=true``
+
+        Uses ``await queue.put()`` with a per-event timeout to apply
+        natural backpressure from pipeline workers.  When the ingestion
+        queue is full, the enqueue blocks until a worker consumes an event.
+        This means bootstrapping a venue with many markets (Polymarket
+        ~3000) will take longer — deliberately, to avoid unbounded memory
+        use or silent event drops.
+
+        Each venue's bootstrap runs as an independent ``asyncio.gather``
+        coroutine so Kalshi (auth, ~300 markets) and Polymarket
+        (no-auth, ~3000 markets) fetch concurrently.
+
+        Args:
+            connector: Venue connector with ``fetch_bootstrap_markets()``.
+        """
+        venue = connector.venue_name.value
+        fetch_timeout = config.BOOTSTRAP_FETCH_TIMEOUT
+        fetch_deadline_sec = config.BOOTSTRAP_FETCH_DEADLINE
+        enqueue_timeout = config.BOOTSTRAP_ENQUEUE_TIMEOUT
+        max_markets = config.BOOTSTRAP_MAX_MARKETS_PER_VENUE
+
+        # ── Phase 1: REST fetch (bounded by timeout + deadline) ───────
+        try:
+            logger.info(
+                "[%s] Bootstrap: fetching active markets "
+                "(timeout=%.0fs, max=%s)...",
+                venue,
+                fetch_timeout,
+                max_markets or "unlimited",
+            )
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + fetch_deadline_sec
+
+            # Pass max_markets to connectors that support it
+            fetch_kwargs: dict = {"deadline": deadline}
+            if max_markets > 0:
+                fetch_kwargs["max_markets"] = max_markets
+
+            bootstrap_events = await asyncio.wait_for(
+                connector.fetch_bootstrap_markets(**fetch_kwargs),
+                timeout=fetch_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[%s] Bootstrap: REST fetch timed out after %.0fs — "
+                "WebSocket will stream updates",
+                venue,
+                fetch_timeout,
+            )
+            return
+        except Exception as exc:
+            logger.warning(
+                "[%s] Bootstrap: REST fetch failed: %s",
+                venue,
+                exc,
+                exc_info=True,
+            )
+            return
+
+        if not bootstrap_events:
+            logger.info("[%s] Bootstrap: 0 markets returned", venue)
+            return
+
+        # ── Phase 2: bounded enqueue with backpressure ────────────────
+        enqueued = 0
+        deduplicated = 0
+        dropped = 0
+
+        for event in bootstrap_events:
+            self._metrics.events_received += 1
+
+            if self._deduplicator.is_duplicate(event):
+                self._metrics.events_deduplicated += 1
+                deduplicated += 1
+                continue
+
+            try:
+                await asyncio.wait_for(
+                    self._ingestion_queue.put(event),
+                    timeout=enqueue_timeout,
+                )
+                enqueued += 1
+            except asyncio.TimeoutError:
+                dropped += 1
+                # Log periodically to avoid log spam with 3000 markets
+                if dropped == 1 or dropped % 100 == 0:
+                    logger.warning(
+                        "[%s] Bootstrap: enqueue timeout (queue full "
+                        "for >%.0fs), dropped %d so far",
+                        venue,
+                        enqueue_timeout,
+                        dropped,
+                    )
+
+        logger.info(
+            "[%s] Bootstrap complete: %d fetched → "
+            "%d enqueued, %d dedup, %d dropped",
+            venue,
+            len(bootstrap_events),
+            enqueued,
+            deduplicated,
+            dropped,
+        )
 
     # ═══════════════════════════════════════════════════════════════════
     #  Ingestion (one task per connector)
@@ -1232,3 +1331,122 @@ def _format_metrics(summary: Dict[str, Any]) -> str:
             f"max={stage_data['max_ms']:>7.1f}ms"
         )
     return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Entry point
+# ═══════════════════════════════════════════════════════════════════════
+
+
+# Standard exit codes
+_EXIT_OK = 0
+_EXIT_STARTUP_FAILURE = 1
+
+
+def _configure_logging() -> None:
+    """
+    Configure root logger with structured format and env-driven level.
+
+    ``LOG_LEVEL`` env var controls verbosity (default: ``INFO``).
+    Uses ISO 8601 timestamps for fintech-grade structured logging.
+    """
+    level_name = (config.LOG_LEVEL or "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S%z",
+        handlers=[logging.StreamHandler(sys.stdout)],
+        force=True,  # Override any prior basicConfig from imported modules
+    )
+
+    # Quiet noisy third-party loggers unless DEBUG is requested.
+    if level > logging.DEBUG:
+        for noisy in (
+            "httpx",
+            "httpcore",
+            "urllib3",
+            "asyncio",
+            "sentence_transformers",
+            "transformers",
+            "qdrant_client",
+        ):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+def _preflight_checks() -> None:
+    """
+    Validate critical configuration before loading GPU models.
+
+    Fails fast with clear error messages instead of cryptic runtime
+    errors deep in the pipeline.
+
+    Raises:
+        SystemExit: If a required config value is missing.
+    """
+    errors: list[str] = []
+
+    if not config.DATABASE_URL:
+        errors.append(
+            "DATABASE_URL is not set.  "
+            "Add it to .env or export it as an environment variable.\n"
+            "  Example: DATABASE_URL=postgresql://postgres:<password>"
+            "@<host>:6543/postgres"
+        )
+
+    if errors:
+        for err in errors:
+            logger.error("Pre-flight check failed: %s", err)
+        sys.exit(_EXIT_STARTUP_FAILURE)
+
+
+async def _async_main() -> None:
+    """
+    Async entry point: initialize and run the orchestrator.
+
+    Startup failures (GPU OOM, unreachable DB/Qdrant, missing models)
+    propagate to the caller for a clean ``sys.exit(1)``.
+    """
+    orchestrator = SemanticPipelineOrchestrator()
+    await orchestrator.initialize()
+    await orchestrator.run()
+
+
+def main() -> None:
+    """
+    Synchronous entry point for ``python orchestrator.py``.
+
+    Lifecycle:
+    1. Configure logging (``LOG_LEVEL`` env var).
+    2. Validate critical env vars (``DATABASE_URL``).
+    3. ``asyncio.run()`` → initialize GPU models → stream events.
+    4. Block until ``SIGINT`` / ``SIGTERM`` (Unix) or
+       ``KeyboardInterrupt`` (Windows).
+
+    Exit codes:
+    - 0: Clean shutdown (signal received).
+    - 1: Startup failure (missing config, GPU OOM, DB unreachable).
+    """
+    _configure_logging()
+    _preflight_checks()
+
+    logger.info("Starting Semantic Pipeline Orchestrator (pid=%d)", os.getpid())
+
+    try:
+        asyncio.run(_async_main())
+    except KeyboardInterrupt:
+        # Windows: SIGINT is delivered as KeyboardInterrupt because
+        # asyncio.add_signal_handler raises NotImplementedError.
+        # asyncio.run() cancels all tasks on exit — cleanup is best-effort.
+        logger.info("Interrupted (KeyboardInterrupt) — shutting down")
+    except Exception as exc:
+        logger.error("Fatal error: %s", exc, exc_info=True)
+        sys.exit(_EXIT_STARTUP_FAILURE)
+
+    logger.info("Semantic Pipeline Orchestrator stopped")
+    sys.exit(_EXIT_OK)
+
+
+if __name__ == "__main__":
+    main()

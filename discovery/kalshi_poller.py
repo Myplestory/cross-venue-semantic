@@ -198,16 +198,24 @@ class KalshiConnector(BaseVenueConnector):
     async def fetch_bootstrap_markets(
         self,
         deadline: Optional[float] = None,
+        max_markets: int = 0,
     ) -> List[MarketEvent]:
         """
-        Fetch current active (open) markets via REST and return as MarketEvents.
-        Used once on startup to bootstrap the pipeline; WebSocket streams updates.
-        GET /trade-api/v2/markets?status=open&limit=1000 with cursor pagination.
-        Only markets with status=open are included (request filter + response filter).
+        Fetch currently active (open) markets via REST.
 
-        If deadline (monotonic time from asyncio.get_event_loop().time()) is set,
-        returns partial results when the deadline is reached so the orchestrator
-        can enqueue them instead of losing all bootstrap data on timeout.
+        Uses ``GET /trade-api/v2/markets?status=open&limit=1000`` with
+        cursor pagination.  The ``status=open`` server-side filter ensures
+        only actively-trading markets are returned — no wasted requests.
+
+        Args:
+            deadline: ``asyncio`` loop time after which to return partial
+                results (prevents the orchestrator from losing all
+                bootstrap data on timeout).
+            max_markets: Cap on total markets returned (0 = unlimited).
+                Useful for dev/testing to limit bootstrap scope.
+
+        Returns:
+            List of ``MarketEvent`` objects, one per open market.
         """
         import aiohttp
 
@@ -227,14 +235,21 @@ class KalshiConnector(BaseVenueConnector):
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 while True:
                     if deadline is not None:
-                        now = asyncio.get_event_loop().time()
+                        now = asyncio.get_running_loop().time()
                         if now >= deadline:
                             logger.warning(
-                                "[Kalshi] Bootstrap: deadline reached, returning %d market(s) from %d page(s)",
+                                "[Kalshi] Bootstrap: deadline reached, "
+                                "returning %d market(s) from %d page(s)",
                                 len(events),
                                 page,
                             )
                             break
+                    if max_markets > 0 and len(events) >= max_markets:
+                        logger.info(
+                            "[Kalshi] Bootstrap: market cap (%d) reached",
+                            max_markets,
+                        )
+                        break
                     page += 1
                     params: dict = {"status": "open", "limit": 1000}
                     if cursor:
@@ -331,6 +346,8 @@ class KalshiConnector(BaseVenueConnector):
                                 received_at=datetime.now(UTC),
                             )
                         )
+                        if max_markets > 0 and len(events) >= max_markets:
+                            break
 
                     cursor = data.get("cursor") if isinstance(data.get("cursor"), str) and data.get("cursor") else None
                     if not cursor or not markets:
