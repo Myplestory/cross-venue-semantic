@@ -704,3 +704,37 @@ class CrossEncoder:
             clause_scores.append(best_match)
 
         return sum(clause_scores) / len(clause_scores) if clause_scores else 0.5
+
+    # ── Bidirectional scoring helpers ─────────────────────────────
+
+    @staticmethod
+    def merge_bidirectional(
+        forward: Dict[str, float],
+        reverse: Dict[str, float],
+    ) -> Dict[str, float]:
+        """
+        Merge forward (A→B) and reverse (B→A) NLI scores into a single
+        mutual-entailment score.
+
+        Uses conservative fusion:
+        - entailment  → min  (both directions must agree)
+        - neutral     → max  (worst-case ambiguity)
+        - contradiction → max (worst-case conflict)
+
+        This catches asymmetric false positives where one market is a
+        superset/subset of the other.
+        """
+        return {
+            "entailment": min(
+                forward.get("entailment", 0.0),
+                reverse.get("entailment", 0.0),
+            ),
+            "neutral": max(
+                forward.get("neutral", 0.0),
+                reverse.get("neutral", 0.0),
+            ),
+            "contradiction": max(
+                forward.get("contradiction", 0.0),
+                reverse.get("contradiction", 0.0),
+            ),
+        }

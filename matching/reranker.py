@@ -80,9 +80,10 @@ class CandidateReranker:
         """
         Re-rank candidates using cross-encoder.
 
-        Two-phase batch scoring:
-        1. All primary events scored in one batch GPU call
-        2. All secondary clause pairs across all qualifying candidates
+        Three-phase batch scoring:
+        1. All primary events scored bidirectionally in one batch GPU call
+           (forward + reverse pairs merged via min-entailment / max-contradiction)
+        2. All secondary clause pairs across qualifying candidates
            collected and scored in one batch GPU call
 
         Total GPU batch calls: 2 (regardless of candidate count).
@@ -106,9 +107,22 @@ class CandidateReranker:
             self.cross_encoder.extract_primary_event(text) for text in candidate_texts
         ]
 
-        # Phase 1: batch score all primary events (1 GPU batch call)
-        primary_pairs = [(query_primary, cp) for cp in candidate_primaries]
-        primary_nli_scores = await self.cross_encoder.score_batch_async(primary_pairs)
+        # Phase 1: bidirectional batch score all primary events
+        # Score both (query→candidate) and (candidate→query) in one GPU
+        # call, then merge via min(entailment) / max(contradiction) to
+        # ensure mutual entailment — catches subset/superset false positives.
+        n = len(candidates)
+        forward_pairs = [(query_primary, cp) for cp in candidate_primaries]
+        reverse_pairs = [(cp, query_primary) for cp in candidate_primaries]
+        all_primary_nli = await self.cross_encoder.score_batch_async(
+            forward_pairs + reverse_pairs
+        )
+        primary_nli_scores = [
+            self.cross_encoder.merge_bidirectional(
+                all_primary_nli[i], all_primary_nli[n + i]
+            )
+            for i in range(n)
+        ]
 
         # Phase 2: identify candidates needing secondary scoring
         primary_results = []

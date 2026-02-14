@@ -35,8 +35,8 @@ class CandidateRetriever:
     def __init__(
         self,
         index: QdrantIndex,
-        default_top_k: int = 10,
-        default_score_threshold: float = 0.7,
+        default_top_k: int = 20,
+        default_score_threshold: float = 0.5,
         max_retries: int = 3,
         retry_backoff_factor: float = 2.0,
         query_timeout: float = 5.0,

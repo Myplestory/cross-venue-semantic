@@ -2,45 +2,40 @@
 
 # Core
 pydantic>=2.0.0
-pydantic-settings>=2.0.0
+python-dotenv>=1.0.0
+python-dateutil>=2.8.2
+
+# Async / Networking
+aiohttp>=3.9.0
+websockets>=12.0
 
 # Database
 asyncpg>=0.29.0
-psycopg2-binary>=2.9.9
 
 # Vector Database
 qdrant-client>=1.7.0
 
 # Embeddings & ML
-sentence-transformers>=2.2.0
 torch>=2.0.0
 transformers>=4.35.0
-tiktoken>=0.5.0
-python-dateutil>=2.8.2
-spacy>=3.7.0
-openai>=1.0.0
+sentence-transformers>=2.2.0
+numpy>=1.24.0
 
-# WebSocket
-websockets>=12.0
+# NLP
+spacy>=3.7.0
+# After install, download the model:  python -m spacy download en_core_web_sm
+
+# Quantization (optional — needed for INT8 on GPU)
+bitsandbytes>=0.42.0
+accelerate>=0.25.0
+
+# Kalshi authentication
+cryptography>=41.0.0
+
+# LLM fallback (optional — only if EXTRACTION_USE_LLM_FALLBACK=true)
+openai>=1.0.0
 
 # Testing
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
 pytest-mock>=3.12.0
-
-# Async utilities
-asyncio>=3.4.3
-aiofiles>=23.2.0
-
-# Caching
-redis>=5.0.0
-h5py>=3.9.0
-
-# LLM (local)
-# Add specific local LLM dependencies based on chosen framework
-# e.g., llama-cpp-python, vllm, etc.
-
-# Utilities
-python-dotenv>=1.0.0
-structlog>=23.2.0
-

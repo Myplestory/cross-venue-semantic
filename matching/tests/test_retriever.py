@@ -17,8 +17,8 @@ async def test_retriever_initialization(mock_qdrant_index):
     retriever = CandidateRetriever(mock_qdrant_index)
     
     assert retriever.index == mock_qdrant_index
-    assert retriever.default_top_k == 10
-    assert retriever.default_score_threshold == 0.7
+    assert retriever.default_top_k == 20
+    assert retriever.default_score_threshold == 0.5
     assert retriever.max_retries == 3
     assert retriever.retry_backoff_factor == 2.0
     assert retriever.query_timeout == 5.0

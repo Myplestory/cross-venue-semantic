@@ -315,13 +315,19 @@ class PairVerifier:
                 contract_spec_b.data_source,
             )
             
-            # Calculate weighted score
+            # Determine which components are informative (have real data)
+            informative = self._compute_informative_flags(
+                contract_spec_a, contract_spec_b
+            )
+            
+            # Calculate weighted score with redistribution
             weighted_score = self._calculate_weighted_score(
                 entity_score,
                 threshold_score,
                 date_score,
                 data_source_score,
-                verified_match.cross_encoder_score
+                verified_match.cross_encoder_score,
+                informative=informative,
             )
             
             # Determine verdict
@@ -330,7 +336,8 @@ class PairVerifier:
                 threshold_score,
                 date_score,
                 weighted_score,
-                verified_match.cross_encoder_score
+                verified_match.cross_encoder_score,
+                informative=informative,
             )
             
             comparison_details = {
@@ -339,7 +346,8 @@ class PairVerifier:
                 "date_score": date_score,
                 "data_source_score": data_source_score,
                 "weighted_score": weighted_score,
-                "fast_path": "binary_market"
+                "fast_path": "binary_market",
+                "informative": informative,
             }
             
             verified_pair = VerifiedPair(
@@ -378,14 +386,23 @@ class PairVerifier:
             entity_task, threshold_task, date_task
         )
         
-        # Early exit: Critical mismatch
-        if entity_score < self.entity_tolerance * 0.5:
+        # Determine which components are informative (needed before early exit)
+        informative = self._compute_informative_flags(
+            contract_spec_a, contract_spec_b
+        )
+        
+        # Early exit: Critical mismatch (only if entity is informative)
+        if (
+            informative.get("entity", True)
+            and entity_score < self.entity_tolerance * 0.5
+        ):
             verdict = "not_equivalent"
             confidence = min(entity_score, threshold_score, date_score)
             outcome_mapping = {}
             comparison_details = {
                 "early_exit": "critical_entity_mismatch",
-                "entity_score": entity_score
+                "entity_score": entity_score,
+                "informative": informative,
             }
             
             verified_pair = VerifiedPair(
@@ -417,13 +434,16 @@ class PairVerifier:
             contract_spec_b.data_source,
         )
         
-        # Calculate weighted score
+        # informative flags already computed before early exit above
+        
+        # Calculate weighted score with redistribution
         weighted_score = self._calculate_weighted_score(
             entity_score,
             threshold_score,
             date_score,
             data_source_score,
-            verified_match.cross_encoder_score
+            verified_match.cross_encoder_score,
+            informative=informative,
         )
         
         # Determine verdict
@@ -432,7 +452,8 @@ class PairVerifier:
             threshold_score,
             date_score,
             weighted_score,
-            verified_match.cross_encoder_score
+            verified_match.cross_encoder_score,
+            informative=informative,
         )
         
         comparison_details = {
@@ -443,7 +464,8 @@ class PairVerifier:
             "weighted_score": weighted_score,
             "entity_details": entity_details,
             "threshold_details": threshold_details,
-            "date_details": date_details
+            "date_details": date_details,
+            "informative": informative,
         }
         
         verified_pair = VerifiedPair(
@@ -564,71 +586,148 @@ class PairVerifier:
             return 1.0  # same source — strong positive
         return 0.0      # different sources — active mismatch
     
+    @staticmethod
+    def _compute_informative_flags(
+        spec_a: ContractSpec,
+        spec_b: ContractSpec,
+    ) -> Dict[str, bool]:
+        """
+        Determine which comparison components have real data.
+
+        A component is **informative** when at least one side has
+        extracted data.  When *both* sides are empty the component
+        is uninformative — its weight should be redistributed to the
+        informative components so that unknown fields don't create
+        an artificial score ceiling.
+
+        cross_encoder and date are always informative (derived from
+        model inference / text, not extraction).
+        """
+        return {
+            "entity": bool(spec_a.entities or spec_b.entities),
+            "threshold": bool(spec_a.thresholds or spec_b.thresholds),
+            "data_source": bool(spec_a.data_source or spec_b.data_source),
+            "date": True,             # always informative (extracted from text)
+            "cross_encoder": True,    # always informative (NLI model score)
+        }
+
     def _calculate_weighted_score(
         self,
         entity_score: float,
         threshold_score: float,
         date_score: float,
         data_source_score: float,
-        cross_encoder_score: float
+        cross_encoder_score: float,
+        informative: Optional[Dict[str, bool]] = None,
     ) -> float:
         """
-        Calculate weighted score using research-backed distribution.
-        
-        Research shows cross-encoder (NLI model) should be primary signal (50%),
-        with structural checks serving as validation signals.
+        Calculate weighted score with dynamic weight redistribution.
+
+        When a component is **uninformative** (both sides empty), its
+        weight is *not* counted — effectively redistributing it
+        proportionally to the informative components by normalising
+        the weighted sum by the active weight total.
+
+        This prevents unknown/empty fields from creating an
+        artificial score ceiling (e.g. 0.5 for entity when both
+        sides have ``entities: []``).
         """
-        return (
-            self.entity_weight * entity_score +
-            self.threshold_weight * threshold_score +
-            self.date_weight * date_score +
-            self.data_source_weight * data_source_score +
-            self.cross_encoder_weight * cross_encoder_score  # PRIMARY SIGNAL
-        )
-    
+        if informative is None:
+            informative = {
+                k: True for k in ("entity", "threshold", "date",
+                                  "data_source", "cross_encoder")
+            }
+
+        components = [
+            ("cross_encoder", self.cross_encoder_weight, cross_encoder_score),
+            ("entity",        self.entity_weight,        entity_score),
+            ("threshold",     self.threshold_weight,     threshold_score),
+            ("date",          self.date_weight,          date_score),
+            ("data_source",   self.data_source_weight,   data_source_score),
+        ]
+
+        active_weight = 0.0
+        weighted_sum = 0.0
+
+        for name, weight, score in components:
+            if informative.get(name, True):
+                active_weight += weight
+                weighted_sum += weight * score
+            # else: skip — this component's weight is implicitly redistributed
+
+        if active_weight > 0:
+            return weighted_sum / active_weight   # normalise to [0, 1]
+        return 0.5  # all unknown — return neutral
+
     def _determine_verdict(
         self,
         entity_score: float,
         threshold_score: float,
         date_score: float,
         weighted_score: float,
-        cross_encoder_score: float
+        cross_encoder_score: float,
+        informative: Optional[Dict[str, bool]] = None,
     ) -> Tuple[str, float]:
         """
-        Determine verdict and confidence using research-backed logic.
-        
+        Determine verdict with awareness of informative vs uninformative
+        components.
+
         Verdicts:
-        - equivalent: All critical fields match, high confidence (weighted_score >= 0.9)
-        - not_equivalent: Critical mismatch or low confidence (weighted_score < 0.5)
-        - needs_review: Ambiguous or partial matches (0.5 <= weighted_score < 0.9)
+        - equivalent: All *informative* critical fields match, high
+          confidence (weighted_score >= equivalent_threshold)
+        - not_equivalent: Critical mismatch in informative field or
+          low confidence (weighted_score < not_equivalent_threshold)
+        - needs_review: Ambiguous or partial matches
+
+        Gate conditions for entity / threshold are **relaxed** when
+        the component is uninformative (both sides empty) so that
+        missing extraction data does not block an otherwise strong
+        cross-encoder match from reaching "equivalent".
         """
-        # Floating-point tolerance for threshold comparisons
+        if informative is None:
+            informative = {
+                k: True for k in ("entity", "threshold", "date",
+                                  "data_source", "cross_encoder")
+            }
+
         EPSILON = 1e-9
-        
-        # Critical mismatch check (early exit)
-        # Date floor raised to 0.5 so that >30-day gaps (score=0.3) are
-        # rejected outright rather than leaking into needs_review.
+
+        # ── Critical mismatch — only check components with real data ──
         if (
-            entity_score < self.entity_tolerance * 0.5 - EPSILON or
-            threshold_score < 0.3 - EPSILON or
+            (informative.get("entity", True)
+             and entity_score < self.entity_tolerance * 0.5 - EPSILON)
+            or
+            (informative.get("threshold", True)
+             and threshold_score < 0.3 - EPSILON)
+            or
             date_score < 0.5 - EPSILON
         ):
             return ("not_equivalent", weighted_score)
-        
-        # High confidence equivalent
+
+        # ── High confidence equivalent ────────────────────────────────
+        # Relax gate for uninformative components
+        entity_ok = (
+            not informative.get("entity", True)
+            or entity_score >= self.entity_tolerance - EPSILON
+        )
+        threshold_ok = (
+            not informative.get("threshold", True)
+            or threshold_score >= 0.8 - EPSILON
+        )
+
         if (
-            weighted_score >= self.equivalent_threshold - EPSILON and
-            entity_score >= self.entity_tolerance - EPSILON and
-            threshold_score >= 0.8 - EPSILON and
-            date_score >= 0.8 - EPSILON and
-            cross_encoder_score >= 0.7 - EPSILON  # Cross-encoder must also be high
+            weighted_score >= self.equivalent_threshold - EPSILON
+            and entity_ok
+            and threshold_ok
+            and date_score >= 0.8 - EPSILON
+            and cross_encoder_score >= 0.7 - EPSILON
         ):
             return ("equivalent", weighted_score)
-        
-        # Low confidence not equivalent
+
+        # ── Low confidence not equivalent ─────────────────────────────
         if weighted_score < self.not_equivalent_threshold - EPSILON:
             return ("not_equivalent", weighted_score)
-        
-        # Needs review (ambiguous)
+
+        # ── Needs review (ambiguous) ──────────────────────────────────
         return ("needs_review", weighted_score)
 

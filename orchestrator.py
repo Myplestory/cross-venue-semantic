@@ -388,7 +388,11 @@ class SemanticPipelineOrchestrator:
         await self._embedding_cache.initialize()
 
         # ── 3. Retrieval ────────────────────────────────────────────
-        self._retriever = CandidateRetriever(index=self._qdrant_index)
+        self._retriever = CandidateRetriever(
+            index=self._qdrant_index,
+            default_top_k=config.RETRIEVAL_TOP_K,
+            default_score_threshold=config.RETRIEVAL_SCORE_THRESHOLD,
+        )
         # Index already initialized above — retriever is ready.
 
         # ── 4. Matching phase (GPU or CPU) ──────────────────────────

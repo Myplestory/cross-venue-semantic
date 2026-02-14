@@ -86,7 +86,9 @@ EMBEDDING_MAX_LENGTH = get_env_int("EMBEDDING_MAX_LENGTH", 512)
 EMBEDDING_DIM = get_env_int("EMBEDDING_DIM", 2048)
 EMBEDDING_INSTRUCTION = get_env(
     "EMBEDDING_INSTRUCTION",
-    "Represent the market contract for similarity search."
+    "Given a prediction market contract, represent its core event, resolution "
+    "conditions, and timeframe for matching equivalent contracts across "
+    "different prediction market platforms"
 )
 EMBEDDING_QUANTIZATION = get_env_bool("EMBEDDING_QUANTIZATION", False)
 
@@ -119,6 +121,12 @@ CROSS_ENCODER_SCORE_THRESHOLD = get_env_float("CROSS_ENCODER_SCORE_THRESHOLD", 0
 CROSS_ENCODER_PRIMARY_WEIGHT = get_env_float("CROSS_ENCODER_PRIMARY_WEIGHT", 0.7)
 CROSS_ENCODER_SECONDARY_WEIGHT = get_env_float("CROSS_ENCODER_SECONDARY_WEIGHT", 0.3)
 CROSS_ENCODER_TOP_K = get_env_int("CROSS_ENCODER_TOP_K", 10)
+
+# Retrieval Configuration
+# Lower threshold = higher recall (more candidates for cross-encoder to filter).
+# Industry standard for two-stage retrieve-then-rerank is 0.45–0.55.
+RETRIEVAL_SCORE_THRESHOLD = get_env_float("RETRIEVAL_SCORE_THRESHOLD", 0.5)
+RETRIEVAL_TOP_K = get_env_int("RETRIEVAL_TOP_K", 20)
 
 # ContractSpec Extraction Configuration
 EXTRACTION_USE_LLM_FALLBACK = get_env_bool("EXTRACTION_USE_LLM_FALLBACK", False)
@@ -246,6 +254,8 @@ def print_config_summary() -> None:
     print(f"  CROSS_ENCODER_BATCH_SIZE: {CROSS_ENCODER_BATCH_SIZE}")
     print(f"  CROSS_ENCODER_QUANTIZATION: {CROSS_ENCODER_QUANTIZATION}")
     print(f"  CROSS_ENCODER_SCORE_THRESHOLD: {CROSS_ENCODER_SCORE_THRESHOLD}")
+    print(f"  RETRIEVAL_SCORE_THRESHOLD: {RETRIEVAL_SCORE_THRESHOLD}")
+    print(f"  RETRIEVAL_TOP_K: {RETRIEVAL_TOP_K}")
     print(f"  DATABASE_URL: {'***' + DATABASE_URL[-20:] if DATABASE_URL else 'Not set'}")
     print(f"  WRITER_BATCH_SIZE: {WRITER_BATCH_SIZE}")
     print(f"  WRITER_BATCH_TIMEOUT: {WRITER_BATCH_TIMEOUT}")
