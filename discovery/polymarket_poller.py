@@ -308,11 +308,20 @@ class PolymarketConnector(BaseVenueConnector):
                 "[Polymarket] Bootstrap failed: %s", exc, exc_info=True
             )
 
+        # Determine if we fetched every page or were truncated
+        # If the last page was full (100 markets), there were likely more
+        last_page_full = (page > 0 and len(events) % _GAMMA_PAGE_SIZE == 0)
+        completeness = (
+            "COMPLETE"
+            if not last_page_full
+            else "TRUNCATED (deadline/cap reached before last page)"
+        )
         logger.info(
             "[Polymarket] Bootstrap: fetched %d active market(s) "
-            "in %d page(s)",
+            "in %d page(s) — %s",
             len(events),
             page,
+            completeness,
         )
         return events
 

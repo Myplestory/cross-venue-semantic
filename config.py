@@ -206,10 +206,14 @@ BOOTSTRAP_ENABLED = get_env_bool("BOOTSTRAP_ENABLED", True)
 # bootstrapping thousands of markets (~25+ hours on an 8 GB GPU).
 BOOTSTRAP_MAX_MARKETS_PER_VENUE = get_env_int("BOOTSTRAP_MAX_MARKETS_PER_VENUE", 0)
 # Hard timeout for the REST fetch phase per venue (seconds).
-BOOTSTRAP_FETCH_TIMEOUT = get_env_float("BOOTSTRAP_FETCH_TIMEOUT", 120.0)
+# Polymarket has 15 000+ active markets at 100/page with a 0.7 s
+# rate-limit delay ≈ 1.2 s/page → 200+ pages needs ~240 s.
+# Kalshi finishes in ~25 s.  Set generous defaults so both venues
+# always fetch ALL markets without truncation.
+BOOTSTRAP_FETCH_TIMEOUT = get_env_float("BOOTSTRAP_FETCH_TIMEOUT", 600.0)
 # Deadline is slightly shorter than timeout so connectors can return
 # partial results before the outer wait_for cancels them.
-BOOTSTRAP_FETCH_DEADLINE = get_env_float("BOOTSTRAP_FETCH_DEADLINE", 110.0)
+BOOTSTRAP_FETCH_DEADLINE = get_env_float("BOOTSTRAP_FETCH_DEADLINE", 570.0)
 # Per-event enqueue timeout (seconds).  await queue.put() blocks if the
 # queue is full; if it stays full for this long, drop the event.
 BOOTSTRAP_ENQUEUE_TIMEOUT = get_env_float("BOOTSTRAP_ENQUEUE_TIMEOUT", 10.0)

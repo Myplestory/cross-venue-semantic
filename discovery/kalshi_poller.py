@@ -396,10 +396,13 @@ class KalshiConnector(BaseVenueConnector):
         except Exception as e:
             logger.warning("[Kalshi] Bootstrap failed: %s", e)
 
+        # cursor being None means the API had no more pages → complete
+        completeness = "COMPLETE" if cursor is None else "TRUNCATED (deadline/cap/error)"
         logger.info(
-            "[Kalshi] Bootstrap: fetched %d active market(s) in %d page(s)",
+            "[Kalshi] Bootstrap: fetched %d active market(s) in %d page(s) — %s",
             len(events),
             page,
+            completeness,
         )
         return events
 
