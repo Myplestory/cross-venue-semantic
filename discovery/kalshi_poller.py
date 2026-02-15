@@ -115,7 +115,15 @@ def _sign_kalshi_request(private_key, method: str, path: str) -> Optional[tuple]
 
 
 class KalshiConnector(BaseVenueConnector):
-    """Kalshi WebSocket connector for market discovery."""
+    """
+    Kalshi WebSocket connector for market discovery.
+
+    NOTE: Despite the "elections" in the hostname, api.elections.kalshi.com
+    is Kalshi's ONLY production API and serves ALL market categories
+    (sports, crypto, entertainment, politics, etc.).  The REST bootstrap
+    queries ``GET /trade-api/v2/markets?status=open`` with no category
+    filter, so every active market is ingested regardless of type.
+    """
     
     def __init__(
         self,
@@ -308,6 +316,21 @@ class KalshiConnector(BaseVenueConnector):
                         1 for m in markets
                         if (m.get("status") or "").lower() in _ACTIVE_STATUSES
                     )
+
+                    # Log unique status values on first page for diagnostics
+                    if page <= 2 and markets:
+                        unique_statuses = set(
+                            (m.get("status") or "MISSING").lower()
+                            for m in markets
+                        )
+                        logger.info(
+                            "[Kalshi] Bootstrap: page %d status values: %s "
+                            "(sample ticker=%s, status=%s)",
+                            page,
+                            unique_statuses,
+                            markets[0].get("ticker", "?"),
+                            markets[0].get("status", "MISSING"),
+                        )
 
                     logger.debug(
                         "[Kalshi] Bootstrap: page %d got %d markets (%d active), cursor=%s",
