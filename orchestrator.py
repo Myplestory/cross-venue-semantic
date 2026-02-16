@@ -236,6 +236,15 @@ class SemanticPipelineOrchestrator:
         await orchestrator.run()  # Blocks until SIGINT / SIGTERM
     """
 
+    # ── Class constants ────────────────────────────────────────────────
+
+    # Run ``torch.cuda.empty_cache()`` every N batches to defragment
+    # the CUDA caching allocator.  Without this, sustained GPU runs
+    # (10 000+ events) degrade from ~150 ms/event to 3 000+ ms/event
+    # due to allocator fragmentation.  10 batches ≈ every ~640 events
+    # at batch_size=64, roughly every 2-5 minutes of wall time.
+    _CUDA_GC_INTERVAL: int = 10
+
     # ── Construction ─────────────────────────────────────────────────
 
     def __init__(
@@ -936,12 +945,18 @@ class SemanticPipelineOrchestrator:
         Inference Server and Ray Serve: GPU-bound stages batch, everything
         else stays per-event.
 
+        Every ``_CUDA_GC_INTERVAL`` batches the worker calls
+        ``torch.cuda.empty_cache()`` to release fragmented CUDA memory
+        blocks back to the driver, preventing the progressive slowdown
+        caused by allocator fragmentation during long runs.
+
         Args:
             worker_id: Worker index for structured logging.
         """
         tag = f"worker-{worker_id}"
         batch_size = self._effective_embed_batch
         batch_timeout = config.WORKER_BATCH_TIMEOUT
+        batches_since_gc = 0
         logger.info(
             "[%s] Started (batch_size=%d, timeout=%.1fs)",
             tag, batch_size, batch_timeout,
@@ -991,6 +1006,24 @@ class SemanticPipelineOrchestrator:
                     tag, len(batch), exc, exc_info=True,
                 )
                 self._metrics.events_failed += len(batch)
+
+            # ── Phase 3: Periodic CUDA GC ────────────────────────
+            # Release fragmented allocator blocks every N batches to
+            # prevent the 133ms→3000ms degradation seen on long runs.
+            batches_since_gc += 1
+            if batches_since_gc >= self._CUDA_GC_INTERVAL:
+                batches_since_gc = 0
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                        logger.debug(
+                            "[%s] CUDA cache cleared (periodic GC)",
+                            tag,
+                        )
+                except ImportError:
+                    pass
 
             if sentinel_seen:
                 break

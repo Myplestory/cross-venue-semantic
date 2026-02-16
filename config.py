@@ -81,7 +81,11 @@ QDRANT_VECTOR_SIZE = get_env_int("QDRANT_VECTOR_SIZE", 2048)
 # Embedding Model Configuration
 EMBEDDING_MODEL = get_env("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-4B")
 EMBEDDING_DEVICE = get_env("EMBEDDING_DEVICE")  # None = auto-detect
-EMBEDDING_BATCH_SIZE = get_env_int("EMBEDDING_BATCH_SIZE", 48)
+# Ceiling for auto-tuned batch size.  48-64 is efficient for short bursts
+# but causes VRAM fragmentation on sustained 40 000+ event runs.  32 keeps
+# peak allocation smaller, leaving headroom for the cross-encoder stage
+# that runs concurrently in stages 3-7 of the same worker loop.
+EMBEDDING_BATCH_SIZE = get_env_int("EMBEDDING_BATCH_SIZE", 32)
 EMBEDDING_MAX_LENGTH = get_env_int("EMBEDDING_MAX_LENGTH", 512)
 EMBEDDING_DIM = get_env_int("EMBEDDING_DIM", 2048)
 EMBEDDING_INSTRUCTION = get_env(
@@ -190,7 +194,14 @@ LOG_LEVEL = get_env("LOG_LEVEL", "INFO")
 
 # Orchestrator Configuration
 ORCHESTRATOR_VENUES = get_env("ORCHESTRATOR_VENUES", "kalshi,polymarket")
-ORCHESTRATOR_INGESTION_QUEUE_SIZE = get_env_int("ORCHESTRATOR_INGESTION_QUEUE_SIZE", 1000)
+# Queue must be large enough to hold the full bootstrap set without drops.
+# Kalshi (~27 000) + Polymarket (~15 000) ≈ 42 000 events.  50 000 gives
+# headroom so bootstrap never blocks on enqueue.
+ORCHESTRATOR_INGESTION_QUEUE_SIZE = get_env_int("ORCHESTRATOR_INGESTION_QUEUE_SIZE", 50000)
+# Default 1 worker: with GPU concurrency=1 on both embedding and cross-
+# encoder, a second worker can never execute a GPU call concurrently so it
+# only adds CUDA allocator contention and memory fragmentation.  Increase
+# to 2 only when running with EMBEDDING_GPU_CONCURRENCY >= 2.
 ORCHESTRATOR_NUM_WORKERS = get_env_int("ORCHESTRATOR_NUM_WORKERS", 1)
 ORCHESTRATOR_MODEL_ID = get_env("ORCHESTRATOR_MODEL_ID", "rule-based-v1")
 ORCHESTRATOR_PROMPT_VERSION = get_env("ORCHESTRATOR_PROMPT_VERSION", "v1.0")

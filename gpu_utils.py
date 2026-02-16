@@ -181,7 +181,11 @@ def profile_cross_encoder_per_sample_mb(
 #  Batch size calculation
 # ═══════════════════════════════════════════════════════════════════════
 
-_SAFETY_FACTOR = 0.75  # Use 75% of free VRAM
+# Use 60% of free VRAM for batch activations.  The remaining 40% is
+# reserved for cross-model overlap (embedding + cross-encoder share VRAM
+# because their GPU semaphores are separate) and for CUDA allocator
+# fragmentation that accumulates over long runs (40 000+ events).
+_SAFETY_FACTOR = 0.60
 
 # Fallback per-sample estimates if profiling fails (conservative, MB).
 # Measured on Qwen3-4B INT8, DeBERTa INT8, max_length=512.
