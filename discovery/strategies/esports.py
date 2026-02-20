@@ -38,7 +38,7 @@ class EsportsDiscoveryStrategy(DiscoveryStrategy):
     Esports discovery: only esports/gaming markets.
     
     Uses venue-specific filtering:
-    - Polymarket: Server-side category filter (esports, gaming, video-games, entertainment)
+    - Polymarket: Client-side category and keyword filtering
     - Kalshi: Client-side keyword filtering (LOL, LEAGUE, DOTA, VALORANT, CSGO, ESPORT, ESPORTS, GAMING)
     """
     
@@ -242,7 +242,7 @@ class EsportsDiscoveryStrategy(DiscoveryStrategy):
         Fetch esports markets for a connector.
         
         Implements venue-specific filtering:
-        - Polymarket: Server-side category filter
+        - Polymarket: Client-side category and keyword filtering
         - Kalshi: Client-side keyword filter
         
         Args:

@@ -10,7 +10,7 @@ from typing import Optional
 
 from orchestrator.discovery.base import DiscoveryStrategy
 from orchestrator.discovery.normal import NormalDiscoveryStrategy
-from orchestrator.discovery.esports import EsportsDiscoveryStrategy
+from discovery.strategies.esports import EsportsDiscoveryStrategy
 from orchestrator.exceptions import ConfigurationError
 import config
 
