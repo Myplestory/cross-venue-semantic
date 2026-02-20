@@ -221,7 +221,8 @@ class PairVerifier:
         contract_spec_a: ContractSpec,
         contract_spec_b: ContractSpec,
         market_a_id: str,
-        market_b_id: str
+        market_b_id: str,
+        is_esports: bool = False
     ) -> VerifiedPair:
         """
         Verify pair equivalence with caching and optimizations.
@@ -338,6 +339,7 @@ class PairVerifier:
                 weighted_score,
                 verified_match.cross_encoder_score,
                 informative=informative,
+                is_esports=is_esports,
             )
             
             comparison_details = {
@@ -454,6 +456,7 @@ class PairVerifier:
             weighted_score,
             verified_match.cross_encoder_score,
             informative=informative,
+            is_esports=is_esports,
         )
         
         comparison_details = {
@@ -525,7 +528,8 @@ class PairVerifier:
                 contract_specs[spec_a_key],
                 contract_specs[spec_b_key],
                 market_a_id,
-                market_b_id
+                market_b_id,
+                is_esports=False  # Default to False, caller should pass if needed
             )
             tasks.append(task)
         
@@ -667,10 +671,11 @@ class PairVerifier:
         weighted_score: float,
         cross_encoder_score: float,
         informative: Optional[Dict[str, bool]] = None,
+        is_esports: bool = False,
     ) -> Tuple[str, float]:
         """
         Determine verdict with awareness of informative vs uninformative
-        components.
+        components and esports-specific relaxations.
 
         Verdicts:
         - equivalent: All *informative* critical fields match, high
@@ -683,6 +688,12 @@ class PairVerifier:
         the component is uninformative (both sides empty) so that
         missing extraction data does not block an otherwise strong
         cross-encoder match from reaching "equivalent".
+
+        Esports-specific relaxations (when is_esports=True and cross_encoder_score > 0.75):
+        - Date gate: 0.3 (vs 0.5) — match date vs resolution date difference
+        - Equivalent threshold: 0.75 (vs 0.9) — when cross-encoder > 0.75
+        - Entity tolerance: 0.6 (vs 0.8) — inconsistent extraction across venues
+        - Date score for equivalent: 0.6 (vs 0.8) — more lenient temporal matching
         """
         if informative is None:
             informative = {
@@ -692,15 +703,40 @@ class PairVerifier:
 
         EPSILON = 1e-9
 
+        # ── Esports-specific relaxations ────────────────────────────────
+        # Apply relaxations when esports mode is active AND cross-encoder score is high
+        esports_relaxation_active = (
+            is_esports and cross_encoder_score > 0.75
+        )
+        
+        if esports_relaxation_active:
+            logger.debug(
+                "Esports relaxation active: cross_encoder=%.3f > 0.75, "
+                "applying relaxed thresholds",
+                cross_encoder_score
+            )
+
+        # Determine thresholds based on esports mode
+        date_gate = 0.3 if esports_relaxation_active else 0.5
+        equivalent_threshold = (
+            0.75 if esports_relaxation_active else self.equivalent_threshold
+        )
+        entity_tolerance_effective = (
+            0.6 if esports_relaxation_active else self.entity_tolerance
+        )
+        date_score_for_equivalent = (
+            0.6 if esports_relaxation_active else 0.8
+        )
+
         # ── Critical mismatch — only check components with real data ──
         if (
             (informative.get("entity", True)
-             and entity_score < self.entity_tolerance * 0.5 - EPSILON)
+             and entity_score < entity_tolerance_effective * 0.5 - EPSILON)
             or
             (informative.get("threshold", True)
              and threshold_score < 0.3 - EPSILON)
             or
-            date_score < 0.5 - EPSILON
+            date_score < date_gate - EPSILON
         ):
             return ("not_equivalent", weighted_score)
 
@@ -708,7 +744,7 @@ class PairVerifier:
         # Relax gate for uninformative components
         entity_ok = (
             not informative.get("entity", True)
-            or entity_score >= self.entity_tolerance - EPSILON
+            or entity_score >= entity_tolerance_effective - EPSILON
         )
         threshold_ok = (
             not informative.get("threshold", True)
@@ -716,12 +752,22 @@ class PairVerifier:
         )
 
         if (
-            weighted_score >= self.equivalent_threshold - EPSILON
+            weighted_score >= equivalent_threshold - EPSILON
             and entity_ok
             and threshold_ok
-            and date_score >= 0.8 - EPSILON
+            and date_score >= date_score_for_equivalent - EPSILON
             and cross_encoder_score >= 0.7 - EPSILON
         ):
+            if esports_relaxation_active:
+                logger.info(
+                    "Esports pair verified as EQUIVALENT with relaxed thresholds: "
+                    "weighted=%.3f (threshold=%.3f), date=%.3f (threshold=%.3f), "
+                    "entity=%.3f (tolerance=%.3f), ce=%.3f",
+                    weighted_score, equivalent_threshold,
+                    date_score, date_score_for_equivalent,
+                    entity_score, entity_tolerance_effective,
+                    cross_encoder_score
+                )
             return ("equivalent", weighted_score)
 
         # ── Low confidence not equivalent ─────────────────────────────

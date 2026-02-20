@@ -1091,6 +1091,11 @@ class SemanticPipelineOrchestrator:
 
         # ── Stage 6: Pair verification ──────────────────────────────
         t0 = time.monotonic()
+        # Determine if esports mode is active
+        is_esports = (
+            config.DISCOVERY_MODE == "esports" or
+            config.DISCOVERY_MODE == "hybrid"
+        )
         verified_pair: VerifiedPair = (
             await self._pair_verifier.verify_pair_async(
                 verified_match=match,
@@ -1098,6 +1103,7 @@ class SemanticPipelineOrchestrator:
                 contract_spec_b=spec_b,
                 market_a_id=query_event.identity_hash,
                 market_b_id=candidate_event.identity_hash,
+                is_esports=is_esports,
             )
         )
         await self._metrics.verification.record(
