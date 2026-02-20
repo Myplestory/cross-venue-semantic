@@ -245,6 +245,33 @@ KALSHI_USE_DEMO = get_env_bool("KALSHI_USE_DEMO", False)
 # Optional: override WebSocket URL (default: wss://api.elections.kalshi.com/trade-api/ws/v2 or demo)
 KALSHI_WS_URL = get_env("KALSHI_WS_URL")
 
+# Discovery Mode Configuration
+# Options: "normal" (default), "esports", "hybrid"/"both" (coming soon)
+# - normal: All active markets from configured venues (current default behavior)
+# - esports: Only esports/gaming markets (client-side filtering by category/keywords)
+# - hybrid/both: Both normal and esports markets (coming soon)
+# 
+# Toggle via environment variable:
+#   export DISCOVERY_MODE=esports
+#   or set in .env: DISCOVERY_MODE=esports
+DISCOVERY_MODE = get_env("DISCOVERY_MODE", "normal")
+
+# Esports-specific configuration (used when DISCOVERY_MODE=esports)
+# Polymarket: Comma-separated category slugs for server-side filtering
+# Examples: "esports", "gaming", "video-games", "entertainment"
+ESPORTS_POLYMARKET_CATEGORIES = get_env(
+    "ESPORTS_POLYMARKET_CATEGORIES",
+    "esports,gaming,video-games,entertainment"
+)
+
+# Kalshi: Comma-separated keywords for client-side filtering
+# Keywords are matched against market title, description, and ticker
+# Examples: "LOL", "LEAGUE", "DOTA", "VALORANT", "CSGO", "ESPORT", "ESPORTS", "GAMING"
+ESPORTS_KALSHI_KEYWORDS = get_env(
+    "ESPORTS_KALSHI_KEYWORDS",
+    "LOL,LEAGUE,DOTA,VALORANT,CSGO,ESPORT,ESPORTS,GAMING"
+)
+
 
 def print_config_summary() -> None:
     """

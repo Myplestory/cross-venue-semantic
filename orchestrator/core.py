@@ -1,171 +1,97 @@
 """
-Semantic Pipeline Orchestrator (backward-compatible wrapper).
+Core orchestrator (modularized from orchestrator.py).
 
-Maintains backward compatibility while using modular orchestrator core.
-The orchestrator now uses discovery strategies for flexible market discovery.
+Handles lifecycle, pipeline workers, and event processing.
+Discovery strategy is injected via dependency injection.
 
-For backward compatibility, this module re-exports the core orchestrator.
-All existing code continues to work without changes.
+Fintech-grade implementation with proper error handling, retry logic,
+and observability.
 """
 
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
-import os
+import signal
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 # ── Path bootstrapping ──────────────────────────────────────────────────
-_PIPELINE_ROOT = str(Path(__file__).resolve().parent)
+_PIPELINE_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PIPELINE_ROOT not in sys.path:
     sys.path.insert(0, _PIPELINE_ROOT)
 
-# ── Import from modular orchestrator ───────────────────────────────────
-from orchestrator.core import SemanticPipelineOrchestrator  # noqa: E402
-from orchestrator.metrics import PipelineMetrics, StageMetrics, STAGE_NAMES  # noqa: E402
-from orchestrator.core import _format_metrics  # noqa: E402
+# ── First-party imports (ordered by pipeline stage) ─────────────────────
+from discovery.types import MarketEvent, VenueType
+from discovery.venue_factory import create_connector
+from discovery.base_connector import BaseVenueConnector
+from discovery.dedup import MarketDeduplicator
 
-import config  # noqa: E402
+from canonicalization.text_builder import (
+    get_builder,
+    CanonicalTextBuilder,
+)
+from canonicalization.hasher import ContentHasher
+from canonicalization.types import CanonicalEvent
+
+from embedding.encoder import EmbeddingEncoder
+from embedding.index import QdrantIndex
+from embedding.cache.in_memory import InMemoryCache
+from embedding.processor import EmbeddingProcessor
+
+from matching.retriever import CandidateRetriever
+from matching.cross_encoder import CrossEncoder
+from matching.reranker import CandidateReranker
+from matching.pair_verifier import PairVerifier
+from matching.types import VerifiedMatch, VerifiedPair
+
+from extraction.spec_extractor import ContractSpecExtractor
+
+from persistence.writer import PipelineWriter, PairWriteRequest
+
+from orchestrator.metrics import PipelineMetrics, StageMetrics
+from orchestrator.discovery.base import DiscoveryStrategy
+from orchestrator.exceptions import (
+    OrchestratorError,
+    DiscoveryStrategyError,
+    BootstrapError,
+)
+
+import config
 
 logger = logging.getLogger(__name__)
 
-# Re-export for backward compatibility
-__all__ = [
-    "SemanticPipelineOrchestrator",
-    "PipelineMetrics",
-    "StageMetrics",
-    "STAGE_NAMES",
-]
+UTC = timezone.utc
+
+# Connector reconnection limits
+_MAX_CONNECTOR_RETRIES = 10
+_CONNECTOR_BASE_BACKOFF = 5.0   # seconds
+_CONNECTOR_MAX_BACKOFF = 300.0  # 5 minutes cap
+
+# Heartbeat interval
+_HEARTBEAT_INTERVAL = 60.0  # seconds
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  Entry point (backward compatible)
-# ═══════════════════════════════════════════════════════════════════════
-
-
-# Standard exit codes
-_EXIT_OK = 0
-_EXIT_STARTUP_FAILURE = 1
-
-
-def _configure_logging() -> None:
-    """
-    Configure root logger with structured format and env-driven level.
-
-    ``LOG_LEVEL`` env var controls verbosity (default: ``INFO``).
-    Uses ISO 8601 timestamps for fintech-grade structured logging.
-    """
-    level_name = (config.LOG_LEVEL or "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
-
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S%z",
-        handlers=[logging.StreamHandler(sys.stdout)],
-        force=True,  # Override any prior basicConfig from imported modules
-    )
-
-    # Quiet noisy third-party loggers unless DEBUG is requested.
-    if level > logging.DEBUG:
-        for noisy in (
-            "httpx",
-            "httpcore",
-            "urllib3",
-            "asyncio",
-            "sentence_transformers",
-            "transformers",
-            "qdrant_client",
-        ):
-            logging.getLogger(noisy).setLevel(logging.WARNING)
-
-
-def _preflight_checks() -> None:
-    """
-    Validate critical configuration before loading GPU models.
-
-    Fails fast with clear error messages instead of cryptic runtime
-    errors deep in the pipeline.
-
-    Raises:
-        SystemExit: If a required config value is missing.
-    """
-    errors: list[str] = []
-
-    if not config.DATABASE_URL:
-        errors.append(
-            "DATABASE_URL is not set.  "
-            "Add it to .env or export it as an environment variable.\n"
-            "  Example: DATABASE_URL=postgresql://postgres:<password>"
-            "@<host>:6543/postgres"
-        )
-
-    if errors:
-        for err in errors:
-            logger.error("Pre-flight check failed: %s", err)
-        sys.exit(_EXIT_STARTUP_FAILURE)
-
-
-async def _async_main() -> None:
-    """
-    Async entry point: initialize and run the orchestrator.
-
-    Startup failures (GPU OOM, unreachable DB/Qdrant, missing models)
-    propagate to the caller for a clean ``sys.exit(1)``.
-    """
-    orchestrator = SemanticPipelineOrchestrator()
-    await orchestrator.initialize()
-    await orchestrator.run()
-
-
-def main() -> None:
-    """
-    Synchronous entry point for ``python orchestrator.py``.
-
-    Lifecycle:
-    1. Configure logging (``LOG_LEVEL`` env var).
-    2. Validate critical env vars (``DATABASE_URL``).
-    3. ``asyncio.run()`` → initialize GPU models → stream events.
-    4. Block until ``SIGINT`` / ``SIGTERM`` (Unix) or
-       ``KeyboardInterrupt`` (Windows).
-
-    Exit codes:
-    - 0: Clean shutdown (signal received).
-    - 1: Startup failure (missing config, GPU OOM, DB unreachable).
-    """
-    _configure_logging()
-    _preflight_checks()
-
-    logger.info("Starting Semantic Pipeline Orchestrator (pid=%d)", os.getpid())
-
-    try:
-        asyncio.run(_async_main())
-    except KeyboardInterrupt:
-        # Windows: SIGINT is delivered as KeyboardInterrupt because
-        # asyncio.add_signal_handler raises NotImplementedError.
-        # asyncio.run() cancels all tasks on exit — cleanup is best-effort.
-        logger.info("Interrupted (KeyboardInterrupt) — shutting down")
-    except Exception as exc:
-        logger.error("Fatal error: %s", exc, exc_info=True)
-        sys.exit(_EXIT_STARTUP_FAILURE)
-
-    logger.info("Semantic Pipeline Orchestrator stopped")
-    sys.exit(_EXIT_OK)
-
-
-if __name__ == "__main__":
-    main()
+class SemanticPipelineOrchestrator:
     """
     Top-level orchestrator for the semantic matching pipeline.
 
     Manages component lifecycles, coordinates per-event flow through
     all pipeline stages, and handles graceful shutdown.
 
+    Uses discovery strategy pattern for flexible market discovery modes.
+
     Usage::
 
+        from orchestrator.discovery import create_discovery_strategy
+        
+        strategy = create_discovery_strategy()
         orchestrator = SemanticPipelineOrchestrator(
-            venues=[VenueType.KALSHI, VenueType.POLYMARKET],
+            discovery_strategy=strategy,
         )
         await orchestrator.initialize()
         await orchestrator.run()  # Blocks until SIGINT / SIGTERM
@@ -184,6 +110,7 @@ if __name__ == "__main__":
 
     def __init__(
         self,
+        discovery_strategy: Optional[DiscoveryStrategy] = None,
         venues: Optional[List[VenueType]] = None,
         ingestion_queue_size: Optional[int] = None,
         num_workers: Optional[int] = None,
@@ -194,20 +121,23 @@ if __name__ == "__main__":
         Create orchestrator.  All parameters fall back to ``config.py``.
 
         Args:
-            venues: Venue types to connect to.
+            discovery_strategy: Discovery strategy instance (default: created from config).
+            venues: Venue types to connect to (default: from discovery strategy).
             ingestion_queue_size: Bounded queue capacity (backpressure).
             num_workers: Concurrent pipeline workers (1 recommended for 8 GB GPU).
             model_id: Extraction model identifier (persisted to DB).
             prompt_version: Extraction prompt version (persisted to DB).
         """
+        # ── Discovery strategy ────────────────────────────────────────
+        if discovery_strategy is None:
+            from orchestrator.discovery import create_discovery_strategy
+            discovery_strategy = create_discovery_strategy()
+        
+        self._discovery_strategy = discovery_strategy
+        
         # ── Parse venues ────────────────────────────────────────────
         if venues is None:
-            venue_str: str = config.ORCHESTRATOR_VENUES or ""
-            venues = [
-                VenueType(v.strip())
-                for v in venue_str.split(",")
-                if v.strip()
-            ]
+            venues = self._discovery_strategy.get_venues()
         self._venues: List[VenueType] = venues
 
         # ── Scalars ─────────────────────────────────────────────────
@@ -253,7 +183,8 @@ if __name__ == "__main__":
         self._effective_embed_batch: int = config.EMBEDDING_BATCH_SIZE
 
         logger.info(
-            "Orchestrator created: venues=%s, workers=%d, queue_size=%d",
+            "Orchestrator created: strategy=%s, venues=%s, workers=%d, queue_size=%d",
+            self._discovery_strategy.get_name(),
             [v.value for v in self._venues],
             self._num_workers,
             self._ingestion_queue_size,
@@ -277,6 +208,19 @@ if __name__ == "__main__":
         logger.info("═══ Initializing semantic pipeline ═══")
         config.print_config_summary()
 
+        # ── Validate discovery strategy configuration ────────────────
+        try:
+            await self._discovery_strategy.validate_configuration()
+        except Exception as exc:
+            logger.error(
+                "Discovery strategy validation failed: %s",
+                exc,
+                exc_info=True,
+            )
+            raise RuntimeError(
+                f"Discovery strategy validation failed: {exc}"
+            ) from exc
+
         # ── 1. Discovery ────────────────────────────────────────────
         self._deduplicator = MarketDeduplicator(
             ttl_seconds=config.ORCHESTRATOR_DEDUP_TTL,
@@ -287,6 +231,10 @@ if __name__ == "__main__":
                 connector = create_connector(venue)
                 self._connectors.append(connector)
                 self._text_builders[venue] = get_builder(venue)
+                
+                # Configure connector with discovery strategy
+                await self._discovery_strategy.configure_connector(connector, venue)
+                
                 logger.info("  ✓ Registered connector: %s", venue.value)
             except ValueError as exc:
                 logger.warning(
@@ -337,7 +285,6 @@ if __name__ == "__main__":
             default_top_k=config.RETRIEVAL_TOP_K,
             default_score_threshold=config.RETRIEVAL_SCORE_THRESHOLD,
         )
-        # Index already initialized above — retriever is ready.
 
         # ── 4. Matching phase (GPU or CPU) ──────────────────────────
         self._cross_encoder = CrossEncoder(
@@ -385,10 +332,6 @@ if __name__ == "__main__":
             cache=self._embedding_cache,
             batch_size=self._effective_embed_batch,
         )
-        # Sub-components already initialized individually above.
-        # Calling processor.initialize() would redundantly reload the
-        # encoder model — encoder's guard (`if self._initialized: return`)
-        # prevents actual re-load but we skip it for clarity.
 
         self._reranker = CandidateReranker(
             cross_encoder=self._cross_encoder,
@@ -474,15 +417,7 @@ if __name__ == "__main__":
             self._worker_tasks.append(task)
 
         # ── Bootstrap: parallel REST fetch of active markets ─────────
-        # Both Kalshi (auth, ~200-500 markets) and Polymarket (no auth,
-        # ~1500-3000 markets) use server-side filters so only actively-
-        # trading markets are returned — zero wasted requests.
-        #
-        # Venues are bootstrapped in parallel (asyncio.gather) since they
-        # hit independent APIs.  Each venue uses bounded enqueue
-        # (await queue.put with timeout) instead of put_nowait so the
-        # REST fetcher naturally throttles when workers can't keep up —
-        # preventing queue overflow and event drops.
+        # Uses discovery strategy to fetch markets with strategy-specific filtering
         if config.BOOTSTRAP_ENABLED:
             bootstrap_connectors = [
                 c
@@ -491,9 +426,10 @@ if __name__ == "__main__":
             ]
             if bootstrap_connectors:
                 logger.info(
-                    "Bootstrap: %d venue(s) with REST bootstrap (%s)",
+                    "Bootstrap: %d venue(s) with REST bootstrap (%s) [strategy: %s]",
                     len(bootstrap_connectors),
                     ", ".join(c.venue_name.value for c in bootstrap_connectors),
+                    self._discovery_strategy.get_name(),
                 )
                 results = await asyncio.gather(
                     *[
@@ -529,7 +465,8 @@ if __name__ == "__main__":
         )
 
         logger.info(
-            "Pipeline running: %d connector(s), %d worker(s)",
+            "Pipeline running: strategy=%s, %d connector(s), %d worker(s)",
+            self._discovery_strategy.get_name(),
             len(self._connector_tasks),
             len(self._worker_tasks),
         )
@@ -595,10 +532,6 @@ if __name__ == "__main__":
                 pass  # Workers will also check _running flag
 
         # ── 4. Wait for workers to drain ────────────────────────────
-        # The drain timeout must exceed the longest possible in-flight
-        # GPU/CPU operation.  With Qwen3-4B INT8 cold-start (~60s) or
-        # FP16 (~300s), and DeBERTa on CPU (~360s worst case), 600s
-        # covers the extreme scenarios without force-cancelling.
         if self._worker_tasks:
             try:
                 await asyncio.wait_for(
@@ -651,71 +584,60 @@ if __name__ == "__main__":
         """
         Bootstrap a single venue: REST fetch → dedup → bounded enqueue.
 
-        Server-side filters ensure **only active markets** are fetched:
-
-        - **Kalshi**: ``status=open`` (excludes closed / settled / unopened)
-        - **Polymarket**: ``closed=false`` + ``active=true``
-
-        Uses ``await queue.put()`` with a per-event timeout to apply
-        natural backpressure from pipeline workers.  When the ingestion
-        queue is full, the enqueue blocks until a worker consumes an event.
-        This means bootstrapping a venue with many markets (Polymarket
-        ~3000) will take longer — deliberately, to avoid unbounded memory
-        use or silent event drops.
-
-        Each venue's bootstrap runs as an independent ``asyncio.gather``
-        coroutine so Kalshi (auth, ~300 markets) and Polymarket
-        (no-auth, ~3000 markets) fetch concurrently.
+        Uses discovery strategy to fetch markets with strategy-specific filtering.
 
         Args:
             connector: Venue connector with ``fetch_bootstrap_markets()``.
         """
-        venue = connector.venue_name.value
+        venue = connector.venue_name
+        venue_name = venue.value
         fetch_timeout = config.BOOTSTRAP_FETCH_TIMEOUT
         fetch_deadline_sec = config.BOOTSTRAP_FETCH_DEADLINE
         enqueue_timeout = config.BOOTSTRAP_ENQUEUE_TIMEOUT
         max_markets = config.BOOTSTRAP_MAX_MARKETS_PER_VENUE
 
-        # ── Phase 1: REST fetch (bounded by timeout + deadline) ───────
+        # ── Phase 1: REST fetch using discovery strategy ───────────────
         try:
             logger.info(
                 "[%s] Bootstrap: fetching active markets "
-                "(timeout=%.0fs, max=%s)...",
-                venue,
+                "(strategy=%s, timeout=%.0fs, max=%s)...",
+                venue_name,
+                self._discovery_strategy.get_name(),
                 fetch_timeout,
                 max_markets or "unlimited",
             )
             loop = asyncio.get_running_loop()
             deadline = loop.time() + fetch_deadline_sec
 
-            # Pass max_markets to connectors that support it
-            fetch_kwargs: dict = {"deadline": deadline}
-            if max_markets > 0:
-                fetch_kwargs["max_markets"] = max_markets
-
+            # Use discovery strategy to fetch markets
             bootstrap_events = await asyncio.wait_for(
-                connector.fetch_bootstrap_markets(**fetch_kwargs),
+                self._discovery_strategy.fetch_bootstrap_markets(
+                    connector,
+                    venue,
+                    deadline=deadline,
+                    max_markets=max_markets,
+                ),
                 timeout=fetch_timeout,
             )
         except asyncio.TimeoutError:
             logger.warning(
                 "[%s] Bootstrap: REST fetch timed out after %.0fs — "
                 "WebSocket will stream updates",
-                venue,
+                venue_name,
                 fetch_timeout,
             )
             return
         except Exception as exc:
             logger.warning(
                 "[%s] Bootstrap: REST fetch failed: %s",
-                venue,
+                venue_name,
                 exc,
                 exc_info=True,
             )
             return
 
         if not bootstrap_events:
-            logger.info("[%s] Bootstrap: 0 markets returned", venue)
+            logger.info("[%s] Bootstrap: 0 markets returned", venue_name)
             return
 
         # ── Phase 2: bounded enqueue with backpressure ────────────────
@@ -744,7 +666,7 @@ if __name__ == "__main__":
                     logger.warning(
                         "[%s] Bootstrap: enqueue timeout (queue full "
                         "for >%.0fs), dropped %d so far",
-                        venue,
+                        venue_name,
                         enqueue_timeout,
                         dropped,
                     )
@@ -752,7 +674,7 @@ if __name__ == "__main__":
         logger.info(
             "[%s] Bootstrap complete: %d fetched → "
             "%d enqueued, %d dedup, %d dropped",
-            venue,
+            venue_name,
             len(bootstrap_events),
             enqueued,
             deduplicated,
@@ -771,6 +693,8 @@ if __name__ == "__main__":
 
         Implements auto-reconnection with exponential backoff.  A single
         connector failure does not affect other connectors or workers.
+        
+        Uses discovery strategy to filter events in real-time.
 
         Args:
             connector: Venue connector to stream from.
@@ -789,6 +713,10 @@ if __name__ == "__main__":
                 async for event in connector.stream_events():
                     if not self._running:
                         return
+
+                    # Apply discovery strategy filter
+                    if not self._discovery_strategy.should_process_event(event):
+                        continue
 
                     self._metrics.events_received += 1
 
@@ -856,11 +784,7 @@ if __name__ == "__main__":
                 )
                 await asyncio.sleep(backoff)
 
-            # Yield control between reconnection cycles — prevents CPU
-            # starvation of other async tasks when the stream returns
-            # immediately (e.g. empty stream, rapid disconnection).
-            # In normal operation the WebSocket blocks inside the async-for
-            # above, making this yield a no-op.  Cost: ~0.
+            # Yield control between reconnection cycles
             await asyncio.sleep(0)
 
     # ═══════════════════════════════════════════════════════════════════
@@ -875,15 +799,6 @@ if __name__ == "__main__":
         on ``WORKER_BATCH_TIMEOUT``) before issuing a single GPU call
         for the embedding stage.  Retrieval, reranking, extraction,
         verification, and persistence remain per-event.
-
-        This is the "adaptive micro-batching" pattern used by Triton
-        Inference Server and Ray Serve: GPU-bound stages batch, everything
-        else stays per-event.
-
-        Every ``_CUDA_GC_INTERVAL`` batches the worker calls
-        ``torch.cuda.empty_cache()`` to release fragmented CUDA memory
-        blocks back to the driver, preventing the progressive slowdown
-        caused by allocator fragmentation during long runs.
 
         Args:
             worker_id: Worker index for structured logging.
@@ -943,8 +858,6 @@ if __name__ == "__main__":
                 self._metrics.events_failed += len(batch)
 
             # ── Phase 3: Periodic CUDA GC ────────────────────────
-            # Release fragmented allocator blocks every N batches to
-            # prevent the 133ms→3000ms degradation seen on long runs.
             batches_since_gc += 1
             if batches_since_gc >= self._CUDA_GC_INTERVAL:
                 batches_since_gc = 0
@@ -981,14 +894,6 @@ if __name__ == "__main__":
         CPU/network stages (retrieval, reranking, extraction, verification,
         persistence) remain per-event.
 
-        Stages:
-        1. Canonicalize all       (CPU, <5 ms each)
-        2. Batch embed + upsert   (1 GPU call for all events)
-        3-7. Per-event: Retrieve -> Rerank -> Extract -> Verify -> Persist
-
-        Falls back gracefully on per-event errors so one bad event
-        doesn't block the batch.
-
         Args:
             events: List of MarketEvents from ingestion queue.
             tag: Worker tag for structured logging.
@@ -1004,7 +909,7 @@ if __name__ == "__main__":
             try:
                 t0 = time.monotonic()
                 canonical = self._canonicalize(event)
-                self._metrics.canonicalization.record(
+                await self._metrics.canonicalization.record(
                     (time.monotonic() - t0) * 1000
                 )
                 canonical_events.append(canonical)
@@ -1039,7 +944,7 @@ if __name__ == "__main__":
         embed_ms = (time.monotonic() - t0) * 1000
         per_event_ms = embed_ms / len(embedded_events) if embedded_events else 0
         for _ in embedded_events:
-            self._metrics.embedding.record(per_event_ms)
+            await self._metrics.embedding.record(per_event_ms)
 
         # ── Stages 3-7: Per-event (retrieve -> rerank -> persist) ─
         for embedded_event, source_event in zip(
@@ -1059,7 +964,7 @@ if __name__ == "__main__":
                     embedded_event,
                     exclude_venue=source_event.venue,
                 )
-                self._metrics.retrieval.record(
+                await self._metrics.retrieval.record(
                     (time.monotonic() - t0) * 1000
                 )
 
@@ -1075,7 +980,7 @@ if __name__ == "__main__":
                         canonical_event, candidates
                     )
                 )
-                self._metrics.reranking.record(
+                await self._metrics.reranking.record(
                     (time.monotonic() - t0) * 1000
                 )
 
@@ -1120,119 +1025,6 @@ if __name__ == "__main__":
             tag, n, batch_ms, batch_ms / n if n else 0,
         )
 
-    # ═══════════════════════════════════════════════════════════════════
-    #  Per-event pipeline (fallback / test utility)
-    # ═══════════════════════════════════════════════════════════════════
-
-    async def _process_event(
-        self, event: MarketEvent, tag: str
-    ) -> None:
-        """
-        Process a single MarketEvent through all pipeline stages.
-
-        Retained as a fallback / test utility.  The production worker
-        uses ``_process_event_batch()`` for GPU-efficient micro-batching.
-
-        Stages:
-        1. Canonicalize          (CPU, <5 ms)
-        2. Embed + Qdrant upsert (GPU + network)
-        3. Retrieve candidates   (network)
-        4. Rerank                (GPU / CPU)
-        5-7. Per-match: Extract -> Verify -> Persist
-
-        Args:
-            event: MarketEvent from discovery.
-            tag: Worker tag for structured logging.
-        """
-        event_id = f"{event.venue.value}:{event.venue_market_id}"
-        pipeline_t0 = time.monotonic()
-
-        try:
-            # ── Stage 1: Canonicalization ────────────────────────────
-            t0 = time.monotonic()
-            canonical_event = self._canonicalize(event)
-            self._metrics.canonicalization.record(
-                (time.monotonic() - t0) * 1000
-            )
-
-            # ── Stage 2: Embedding ──────────────────────────────────
-            t0 = time.monotonic()
-            embedded_event = await self._embedding_processor.process_async(
-                canonical_event
-            )
-            self._metrics.embedding.record(
-                (time.monotonic() - t0) * 1000
-            )
-
-            # ── Stage 3: Retrieval ──────────────────────────────────
-            t0 = time.monotonic()
-            candidates = await self._retriever.retrieve_candidates(
-                embedded_event,
-                exclude_venue=event.venue,   # cross-venue matching only
-            )
-            self._metrics.retrieval.record(
-                (time.monotonic() - t0) * 1000
-            )
-
-            if not candidates:
-                self._metrics.events_no_candidates += 1
-                self._metrics.events_processed += 1
-                return
-
-            # ── Stage 4: Reranking ──────────────────────────────────
-            t0 = time.monotonic()
-            verified_matches: List[VerifiedMatch] = (
-                await self._reranker.rerank_async(
-                    canonical_event, candidates
-                )
-            )
-            self._metrics.reranking.record(
-                (time.monotonic() - t0) * 1000
-            )
-
-            if not verified_matches:
-                self._metrics.events_processed += 1
-                return
-
-            self._metrics.pairs_found += len(verified_matches)
-
-            # ── Stages 5–7: per-match processing ────────────────────
-            for match in verified_matches:
-                try:
-                    await self._process_match(
-                        canonical_event, match, tag
-                    )
-                except Exception as exc:
-                    logger.error(
-                        "[%s] Match processing failed for %s: %s",
-                        tag,
-                        event_id,
-                        exc,
-                        exc_info=True,
-                    )
-
-            self._metrics.events_processed += 1
-
-            elapsed_ms = (time.monotonic() - pipeline_t0) * 1000
-            logger.info(
-                "[%s] %s → %d candidates, %d matches, %.0f ms",
-                tag,
-                event_id,
-                len(candidates),
-                len(verified_matches),
-                elapsed_ms,
-            )
-
-        except Exception as exc:
-            self._metrics.events_failed += 1
-            logger.error(
-                "[%s] Pipeline failed for %s: %s",
-                tag,
-                event_id,
-                exc,
-                exc_info=True,
-            )
-
     # ─────────────────────────────────────────────────────────────────
 
     async def _process_match(
@@ -1265,7 +1057,7 @@ if __name__ == "__main__":
                 candidate_event.content_hash,
             ),
         )
-        self._metrics.extraction.record(
+        await self._metrics.extraction.record(
             (time.monotonic() - t0) * 1000
         )
 
@@ -1280,7 +1072,7 @@ if __name__ == "__main__":
                 market_b_id=candidate_event.identity_hash,
             )
         )
-        self._metrics.verification.record(
+        await self._metrics.verification.record(
             (time.monotonic() - t0) * 1000
         )
 
@@ -1312,7 +1104,7 @@ if __name__ == "__main__":
                     tag,
                     verified_pair.pair_key,
                 )
-            self._metrics.persistence.record(
+            await self._metrics.persistence.record(
                 (time.monotonic() - t0) * 1000
             )
 
@@ -1374,9 +1166,10 @@ if __name__ == "__main__":
                 queue_depth = self._ingestion_queue.qsize()
 
                 logger.info(
-                    "♥ HEARTBEAT | rcvd=%d proc=%d fail=%d "
+                    "♥ HEARTBEAT | strategy=%s | rcvd=%d proc=%d fail=%d "
                     "pairs=%d equiv=%d review=%d persisted=%d "
                     "queue=%d/%d",
+                    self._discovery_strategy.get_name(),
                     m.events_received,
                     m.events_processed,
                     m.events_failed,
@@ -1466,8 +1259,9 @@ if __name__ == "__main__":
         """
         return {
             "status": "running" if self._running else "stopped",
+            "discovery_strategy": self._discovery_strategy.get_name(),
             "connectors": {
-                c.venue_name.value: c._running
+                c.venue_name.value: getattr(c, "_running", False)
                 for c in self._connectors
             },
             "ingestion_queue": {
@@ -1486,9 +1280,9 @@ if __name__ == "__main__":
         return self._metrics.summary()
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
 #  Helpers
-# ═══════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
 
 
 def _format_metrics(summary: Dict[str, Any]) -> str:
@@ -1518,121 +1312,3 @@ def _format_metrics(summary: Dict[str, Any]) -> str:
         )
     return "\n".join(lines)
 
-
-# ═══════════════════════════════════════════════════════════════════════
-#  Entry point
-# ═══════════════════════════════════════════════════════════════════════
-
-
-# Standard exit codes
-_EXIT_OK = 0
-_EXIT_STARTUP_FAILURE = 1
-
-
-def _configure_logging() -> None:
-    """
-    Configure root logger with structured format and env-driven level.
-
-    ``LOG_LEVEL`` env var controls verbosity (default: ``INFO``).
-    Uses ISO 8601 timestamps for fintech-grade structured logging.
-    """
-    level_name = (config.LOG_LEVEL or "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
-
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S%z",
-        handlers=[logging.StreamHandler(sys.stdout)],
-        force=True,  # Override any prior basicConfig from imported modules
-    )
-
-    # Quiet noisy third-party loggers unless DEBUG is requested.
-    if level > logging.DEBUG:
-        for noisy in (
-            "httpx",
-            "httpcore",
-            "urllib3",
-            "asyncio",
-            "sentence_transformers",
-            "transformers",
-            "qdrant_client",
-        ):
-            logging.getLogger(noisy).setLevel(logging.WARNING)
-
-
-def _preflight_checks() -> None:
-    """
-    Validate critical configuration before loading GPU models.
-
-    Fails fast with clear error messages instead of cryptic runtime
-    errors deep in the pipeline.
-
-    Raises:
-        SystemExit: If a required config value is missing.
-    """
-    errors: list[str] = []
-
-    if not config.DATABASE_URL:
-        errors.append(
-            "DATABASE_URL is not set.  "
-            "Add it to .env or export it as an environment variable.\n"
-            "  Example: DATABASE_URL=postgresql://postgres:<password>"
-            "@<host>:6543/postgres"
-        )
-
-    if errors:
-        for err in errors:
-            logger.error("Pre-flight check failed: %s", err)
-        sys.exit(_EXIT_STARTUP_FAILURE)
-
-
-async def _async_main() -> None:
-    """
-    Async entry point: initialize and run the orchestrator.
-
-    Startup failures (GPU OOM, unreachable DB/Qdrant, missing models)
-    propagate to the caller for a clean ``sys.exit(1)``.
-    """
-    orchestrator = SemanticPipelineOrchestrator()
-    await orchestrator.initialize()
-    await orchestrator.run()
-
-
-def main() -> None:
-    """
-    Synchronous entry point for ``python orchestrator.py``.
-
-    Lifecycle:
-    1. Configure logging (``LOG_LEVEL`` env var).
-    2. Validate critical env vars (``DATABASE_URL``).
-    3. ``asyncio.run()`` → initialize GPU models → stream events.
-    4. Block until ``SIGINT`` / ``SIGTERM`` (Unix) or
-       ``KeyboardInterrupt`` (Windows).
-
-    Exit codes:
-    - 0: Clean shutdown (signal received).
-    - 1: Startup failure (missing config, GPU OOM, DB unreachable).
-    """
-    _configure_logging()
-    _preflight_checks()
-
-    logger.info("Starting Semantic Pipeline Orchestrator (pid=%d)", os.getpid())
-
-    try:
-        asyncio.run(_async_main())
-    except KeyboardInterrupt:
-        # Windows: SIGINT is delivered as KeyboardInterrupt because
-        # asyncio.add_signal_handler raises NotImplementedError.
-        # asyncio.run() cancels all tasks on exit — cleanup is best-effort.
-        logger.info("Interrupted (KeyboardInterrupt) — shutting down")
-    except Exception as exc:
-        logger.error("Fatal error: %s", exc, exc_info=True)
-        sys.exit(_EXIT_STARTUP_FAILURE)
-
-    logger.info("Semantic Pipeline Orchestrator stopped")
-    sys.exit(_EXIT_OK)
-
-
-if __name__ == "__main__":
-    main()
