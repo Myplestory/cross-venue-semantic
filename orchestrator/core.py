@@ -1116,6 +1116,13 @@ class SemanticPipelineOrchestrator:
         weighted_score = comparison_details.get("weighted_score", 0.0)
         cross_encoder_score = match.cross_encoder_score
         
+        # Extract ContractSpec details for diagnostics
+        spec_a_thresholds = len(spec_a.thresholds) if spec_a.thresholds else 0
+        spec_b_thresholds = len(spec_b.thresholds) if spec_b.thresholds else 0
+        spec_a_entities = len(spec_a.entities) if spec_a.entities else 0
+        spec_b_entities = len(spec_b.entities) if spec_b.entities else 0
+        informative = comparison_details.get("informative", {})
+        
         # Extract market titles and venue info for logging
         query_title = query_event.event.title or "N/A"
         query_venue = query_event.event.venue.value if query_event.event.venue else "N/A"
@@ -1134,7 +1141,8 @@ class SemanticPipelineOrchestrator:
         # Log verdict and scores for diagnostics with market names
         logger.info(
             "[%s] Verification: [%s] %s -> [%s] %s | confidence=%.3f | "
-            "scores: weighted=%.3f, ce=%.3f, entity=%.3f, threshold=%.3f, date=%.3f",
+            "scores: weighted=%.3f, ce=%.3f, entity=%.3f, threshold=%.3f, date=%.3f | "
+            "extracted: entities=(%d/%d), thresholds=(%d/%d), informative=%s",
             tag,
             query_venue,
             query_title_display,
@@ -1146,6 +1154,11 @@ class SemanticPipelineOrchestrator:
             entity_score,
             threshold_score,
             date_score,
+            spec_a_entities,
+            spec_b_entities,
+            spec_a_thresholds,
+            spec_b_thresholds,
+            informative,
         )
         
         if verdict == "equivalent":
