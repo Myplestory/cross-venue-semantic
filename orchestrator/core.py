@@ -585,6 +585,8 @@ class SemanticPipelineOrchestrator:
         Bootstrap a single venue: REST fetch → dedup → bounded enqueue.
 
         Uses discovery strategy to fetch markets with strategy-specific filtering.
+        The timeout is adaptive: returns immediately when fetching completes,
+        only using the full timeout if fetching is still in progress.
 
         Args:
             connector: Venue connector with ``fetch_bootstrap_markets()``.
@@ -597,6 +599,7 @@ class SemanticPipelineOrchestrator:
         max_markets = config.BOOTSTRAP_MAX_MARKETS_PER_VENUE
 
         # ── Phase 1: REST fetch using discovery strategy ───────────────
+        fetch_start_time = time.monotonic()
         try:
             logger.info(
                 "[%s] Bootstrap: fetching active markets "
@@ -610,6 +613,8 @@ class SemanticPipelineOrchestrator:
             deadline = loop.time() + fetch_deadline_sec
 
             # Use discovery strategy to fetch markets
+            # asyncio.wait_for() returns immediately when the coroutine completes,
+            # only waiting the full timeout if fetching is still in progress
             bootstrap_events = await asyncio.wait_for(
                 self._discovery_strategy.fetch_bootstrap_markets(
                     connector,
@@ -619,18 +624,41 @@ class SemanticPipelineOrchestrator:
                 ),
                 timeout=fetch_timeout,
             )
+            
+            # Log actual fetch time vs timeout
+            fetch_elapsed = time.monotonic() - fetch_start_time
+            if fetch_elapsed < fetch_timeout:
+                logger.debug(
+                    "[%s] Bootstrap: fetch completed in %.1fs "
+                    "(well under %.0fs timeout)",
+                    venue_name,
+                    fetch_elapsed,
+                    fetch_timeout,
+                )
+            else:
+                logger.info(
+                    "[%s] Bootstrap: fetch completed in %.1fs "
+                    "(approached %.0fs timeout)",
+                    venue_name,
+                    fetch_elapsed,
+                    fetch_timeout,
+                )
         except asyncio.TimeoutError:
+            fetch_elapsed = time.monotonic() - fetch_start_time
             logger.warning(
-                "[%s] Bootstrap: REST fetch timed out after %.0fs — "
-                "WebSocket will stream updates",
+                "[%s] Bootstrap: REST fetch timed out after %.1fs "
+                "(timeout=%.0fs) — WebSocket will stream updates",
                 venue_name,
+                fetch_elapsed,
                 fetch_timeout,
             )
             return
         except Exception as exc:
+            fetch_elapsed = time.monotonic() - fetch_start_time
             logger.warning(
-                "[%s] Bootstrap: REST fetch failed: %s",
+                "[%s] Bootstrap: REST fetch failed after %.1fs: %s",
                 venue_name,
+                fetch_elapsed,
                 exc,
                 exc_info=True,
             )
