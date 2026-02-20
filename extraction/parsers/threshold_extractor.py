@@ -113,12 +113,41 @@ class ThresholdExtractor:
         
         # --- Bare numbers before unit words ---
         for match in BARE_NUMBER_BEFORE_UNIT.finditer(combined):
+            # Filter out false positives: game/map/match/win identifiers (e.g., "Game 3 Winner", "Map 1", "3 Winner")
+            # These are ordinal identifiers, not thresholds
+            match_start = match.start()
+            match_end = match.end()
+            context_before = combined[max(0, match_start - 20):match_start].lower()
+            context_after = combined[match_end:min(len(combined), match_end + 20)].lower()
+            matched_text = match.group(0).lower()
+            
+            # Parse threshold first to check the unit
             threshold = self._parse_bare_number(match, 1, combined)
-            if threshold:
-                key = (threshold.value, threshold.unit)
-                if key not in seen:
-                    seen.add(key)
-                    thresholds.append(threshold)
+            if not threshold:
+                continue
+            
+            # Skip if it's a game/map/match/win identifier (ordinal, not threshold)
+            # Pattern: "Game X Winner", "Map X", "Match X", "3 Winner" (from "Game 3 Winner")
+            # Check if unit is game/map/match/win AND context has winner/loser/etc.
+            is_ordinal_identifier = (
+                threshold.unit in ['game', 'games', 'map', 'maps', 'match', 'matches', 'win', 'wins']
+                and any(keyword in context_after for keyword in ['winner', 'loser', 'victor', 'champion', 'result', 'outcome', 'ner', 'ser'])
+            )
+            
+            # Also check if "Game X", "Map X", "Match X" appears before the number
+            is_game_map_match_before = (
+                any(prefix in context_before for prefix in ['game ', 'map ', 'match '])
+                and threshold.unit in ['game', 'games', 'map', 'maps', 'match', 'matches', 'win', 'wins']
+                and any(keyword in context_after for keyword in ['winner', 'loser', 'victor', 'champion', 'result', 'outcome'])
+            )
+            
+            if is_ordinal_identifier or is_game_map_match_before:
+                continue
+            
+            key = (threshold.value, threshold.unit)
+            if key not in seen:
+                seen.add(key)
+                thresholds.append(threshold)
         
         return thresholds
     
