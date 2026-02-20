@@ -452,11 +452,15 @@ class KalshiConnector(BaseVenueConnector):
                     return None
                 # Skip multi-game parlay/combo markets
                 if "MULTIGAME" in market_ticker.upper():
-                    logger.debug("[Kalshi] Skipping multi-game parlay: %s", market_ticker)
+                    # Truncate ticker if too long
+                    display_ticker = market_ticker[:57] + "..." if len(market_ticker) > 60 else market_ticker
+                    logger.debug("[Kalshi] Skipping multi-game parlay: %s", display_ticker)
                     return None
                 event_type_str = (msg.get("event_type") or "").lower()
                 if event_type_str in ("deactivated", "determined", "settled"):
-                    logger.debug("[Kalshi] Skipping non-active market %s (event_type=%s)", market_ticker, event_type_str)
+                    # Truncate ticker if too long
+                    display_ticker = market_ticker[:57] + "..." if len(market_ticker) > 60 else market_ticker
+                    logger.debug("[Kalshi] Skipping non-active market %s (event_type=%s)", display_ticker, event_type_str)
                     return None
                 event_type = EventType.CREATED if event_type_str == "created" else EventType.UPDATED
                 meta = msg.get("additional_metadata") or {}

@@ -1106,12 +1106,94 @@ class SemanticPipelineOrchestrator:
 
         # ── Track verdict ───────────────────────────────────────────
         verdict = verified_pair.verdict
+        confidence = verified_pair.confidence
+        comparison_details = verified_pair.comparison_details
+        
+        # Extract component scores for logging
+        entity_score = comparison_details.get("entity_score", 0.0)
+        threshold_score = comparison_details.get("threshold_score", 0.0)
+        date_score = comparison_details.get("date_score", 0.0)
+        weighted_score = comparison_details.get("weighted_score", 0.0)
+        cross_encoder_score = match.cross_encoder_score
+        
+        # Extract market titles and venue info for logging
+        query_title = query_event.event.title or "N/A"
+        query_venue = query_event.event.venue.value if query_event.event.venue else "N/A"
+        candidate_title = candidate_event.event.title or "N/A"
+        candidate_venue = candidate_event.event.venue.value if candidate_event.event.venue else "N/A"
+        
+        # Truncate long titles to prevent log overflow (max 80 chars)
+        def truncate_title(title: str, max_len: int = 80) -> str:
+            if len(title) <= max_len:
+                return title
+            return title[:max_len - 3] + "..."
+        
+        query_title_display = truncate_title(query_title)
+        candidate_title_display = truncate_title(candidate_title)
+        
+        # Log verdict and scores for diagnostics with market names
+        logger.info(
+            "[%s] Verification: [%s] %s -> [%s] %s | confidence=%.3f | "
+            "scores: weighted=%.3f, ce=%.3f, entity=%.3f, threshold=%.3f, date=%.3f",
+            tag,
+            query_venue,
+            query_title_display,
+            candidate_venue,
+            candidate_title_display,
+            confidence,
+            weighted_score,
+            cross_encoder_score,
+            entity_score,
+            threshold_score,
+            date_score,
+        )
+        
         if verdict == "equivalent":
             self._metrics.pairs_equivalent += 1
+            logger.info(
+                "[%s] ✓ Pair verified as EQUIVALENT (will persist): [%s] %s <-> [%s] %s",
+                tag,
+                query_venue,
+                query_title_display,
+                candidate_venue,
+                candidate_title_display,
+            )
         elif verdict == "needs_review":
             self._metrics.pairs_needs_review += 1
+            logger.info(
+                "[%s] ⚠ Pair verified as NEEDS_REVIEW (will persist): [%s] %s <-> [%s] %s",
+                tag,
+                query_venue,
+                query_title_display,
+                candidate_venue,
+                candidate_title_display,
+            )
         else:
             self._metrics.pairs_not_equivalent += 1
+            # Log why it failed (check critical gates)
+            failure_reasons = []
+            if entity_score < self._pair_verifier.entity_tolerance * 0.5:
+                failure_reasons.append(f"entity_score={entity_score:.3f} < {self._pair_verifier.entity_tolerance * 0.5:.3f}")
+            if threshold_score < 0.3:
+                failure_reasons.append(f"threshold_score={threshold_score:.3f} < 0.3")
+            if date_score < 0.5:
+                failure_reasons.append(f"date_score={date_score:.3f} < 0.5")
+            if weighted_score < self._pair_verifier.equivalent_threshold:
+                failure_reasons.append(f"weighted_score={weighted_score:.3f} < {self._pair_verifier.equivalent_threshold:.3f}")
+            if cross_encoder_score < 0.7:
+                failure_reasons.append(f"cross_encoder_score={cross_encoder_score:.3f} < 0.7")
+            if weighted_score < self._pair_verifier.not_equivalent_threshold:
+                failure_reasons.append(f"weighted_score={weighted_score:.3f} < {self._pair_verifier.not_equivalent_threshold:.3f} (not_equivalent threshold)")
+            
+            logger.info(
+                "[%s] ✗ Pair verified as NOT_EQUIVALENT (dropped): [%s] %s <-> [%s] %s | reasons: %s",
+                tag,
+                query_venue,
+                query_title_display,
+                candidate_venue,
+                candidate_title_display,
+                ", ".join(failure_reasons) if failure_reasons else "low confidence",
+            )
 
         # ── Stage 7: Persist (only actionable verdicts) ─────────────
         if verdict in ("equivalent", "needs_review"):

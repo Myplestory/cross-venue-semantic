@@ -15,7 +15,11 @@ from typing import List, Optional, Set
 try:
     import spacy
     HAS_SPACY = True
-except ImportError:
+except (ImportError, Exception):
+    # Catch all exceptions during spaCy import, including:
+    # - ImportError: spaCy not installed
+    # - ConfigError: Pydantic v1 compatibility issues (Python 3.14+)
+    # - Other initialization errors
     HAS_SPACY = False
 
 from canonicalization.contract_spec import EntitySpec
