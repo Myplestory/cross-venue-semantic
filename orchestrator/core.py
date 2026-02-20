@@ -1195,42 +1195,62 @@ class SemanticPipelineOrchestrator:
             logger.info("PyTorch not installed — GPU diagnostics skipped")
             return
 
-        if not torch.cuda.is_available():
-            logger.info("No CUDA GPU detected — running on CPU")
-            return
-
-        for i in range(torch.cuda.device_count()):
-            props = torch.cuda.get_device_properties(i)
-            total_gb = props.total_memory / 1e9
-            alloc_gb = torch.cuda.memory_allocated(i) / 1e9
-            logger.info(
-                "  GPU %d (%s): %.1f GB total, %.1f GB allocated, "
-                "%.1f GB free",
-                i,
-                props.name,
-                total_gb,
-                alloc_gb,
-                total_gb - alloc_gb,
-            )
-
         emb_dev = getattr(self._embedding_encoder, "device", "?")
         ce_dev = getattr(self._cross_encoder, "device", "?")
-        logger.info(
-            "  Model placement: embedding=%s  cross_encoder=%s",
-            emb_dev,
-            ce_dev,
-        )
-
-        if str(emb_dev) == "cuda" and str(ce_dev) == "cuda":
-            total_mem_gb = (
-                torch.cuda.get_device_properties(0).total_memory / 1e9
-            )
-            if total_mem_gb < 12:
-                logger.warning(
-                    "  ⚠ Both models on CUDA with only %.1f GB VRAM. "
-                    "Set CROSS_ENCODER_DEVICE=cpu in .env if you hit OOM.",
-                    total_mem_gb,
+        
+        # Check for CUDA
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                props = torch.cuda.get_device_properties(i)
+                total_gb = props.total_memory / 1e9
+                alloc_gb = torch.cuda.memory_allocated(i) / 1e9
+                logger.info(
+                    "  GPU %d (%s): %.1f GB total, %.1f GB allocated, "
+                    "%.1f GB free",
+                    i,
+                    props.name,
+                    total_gb,
+                    alloc_gb,
+                    total_gb - alloc_gb,
                 )
+            
+            logger.info(
+                "  Model placement: embedding=%s  cross_encoder=%s",
+                emb_dev,
+                ce_dev,
+            )
+            
+            if str(emb_dev) == "cuda" and str(ce_dev) == "cuda":
+                total_mem_gb = (
+                    torch.cuda.get_device_properties(0).total_memory / 1e9
+                )
+                if total_mem_gb < 12:
+                    logger.warning(
+                        "  ⚠ Both models on CUDA with only %.1f GB VRAM. "
+                        "Set CROSS_ENCODER_DEVICE=cpu in .env if you hit OOM.",
+                        total_mem_gb,
+                    )
+        # Check for MPS (Apple Silicon)
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            logger.info("MPS (Apple Silicon GPU) detected — models running on MPS")
+            logger.info(
+                "  Model placement: embedding=%s  cross_encoder=%s",
+                emb_dev,
+                ce_dev,
+            )
+            # MPS doesn't expose memory stats like CUDA, but we can log device info
+            if str(emb_dev) == "mps" or str(ce_dev) == "mps":
+                logger.info(
+                    "  ✓ Models configured for MPS acceleration "
+                    "(Apple Silicon GPU)"
+                )
+        else:
+            logger.info("No GPU detected — running on CPU")
+            logger.info(
+                "  Model placement: embedding=%s  cross_encoder=%s",
+                emb_dev,
+                ce_dev,
+            )
 
     def _release_gpu_memory(self) -> None:
         """Release GPU memory on shutdown."""
@@ -1240,6 +1260,9 @@ class SemanticPipelineOrchestrator:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 logger.info("CUDA cache cleared")
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                # MPS doesn't have explicit cache clearing, but we can log it
+                logger.debug("MPS memory will be released by system")
         except ImportError:
             pass
 

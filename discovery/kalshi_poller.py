@@ -323,12 +323,16 @@ class KalshiConnector(BaseVenueConnector):
                             (m.get("status") or "MISSING").lower()
                             for m in markets
                         )
+                        # Truncate ticker if too long to prevent log line overflow
+                        sample_ticker = markets[0].get("ticker", "?")
+                        if len(sample_ticker) > 60:
+                            sample_ticker = sample_ticker[:57] + "..."
                         logger.info(
                             "[Kalshi] Bootstrap: page %d status values: %s "
                             "(sample ticker=%s, status=%s)",
                             page,
                             unique_statuses,
-                            markets[0].get("ticker", "?"),
+                            sample_ticker,
                             markets[0].get("status", "MISSING"),
                         )
 
