@@ -6,7 +6,7 @@ Archived as PolyEdge infrastructure exploration. Built to validate cross-venue a
 
 ## Architecture
 
-7-stage pipeline that ingests prediction market contracts from multiple venues and identifies semantically equivalent markets across platforms.
+Venue-agnostic 7-stage pipeline that ingests prediction market contracts from any supported venue and identifies semantically equivalent markets across platforms. Adding a new venue requires only a connector and a text builder — the matching, verification, and persistence layers are fully venue-independent.
 
 ```
 Venue Connectors (Kalshi WS, Polymarket REST/WS)
