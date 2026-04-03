@@ -2,7 +2,7 @@
 
 A GPU-accelerated semantic matching pipeline for identifying equivalent contracts across prediction market venues (Polymarket, Kalshi). Two-stage retrieve-then-rerank (Qwen3-Embedding-4B + DeBERTa-v3 NLI) over Qdrant, with venue-agnostic discovery, micro-batch GPU scheduling, and esports market latency analysis.
 
-Archived as PolyEdge infrastructure exploration. Built to validate cross-venue arbitrage feasibility — the matching pipeline works, but spread economics don't support profitable execution. Published as a reference iterative implementation.
+Archived as [PolyEdge](https://polyedge.trade) infrastructure exploration. Built to validate cross-venue arbitrage feasibility — the matching pipeline works, but spread economics don't support profitable execution. Published as a reference iterative implementation.
 
 ## Architecture
 
@@ -193,4 +193,4 @@ These scripts document the research process — investigating whether cross-venu
 
 ## Status
 
-**Archived.** This was an iterative exploration into cross-venue arbitrage feasibility and its integration into the PolyEdge platform. The semantic matching pipeline works — cross-venue pairs are correctly identified and verified with high precision. The arb thesis was invalidated: prediction market spreads are too thin and venue-to-venue latency too high for profitable execution after fees. The venue discovery and market resolution infrastructure evolved into PolyEdge's production data API.
+**Archived.** This was an iterative exploration into cross-venue arbitrage feasibility and its integration into the PolyEdge platform. The semantic matching pipeline works — cross-venue pairs are correctly identified and verified with high precision. The arb thesis was invalidated: prediction market spreads are too thin and venue-to-venue latency too high for profitable execution after fees. The venue discovery and market resolution infrastructure evolved into [PolyEdge](https://polyedge.trade)'s production data API.
